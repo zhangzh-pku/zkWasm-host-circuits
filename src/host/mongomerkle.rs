@@ -1233,4 +1233,49 @@ mod tests {
             calls
         );
     }
+
+    #[test]
+    fn test_merkle_cache_hits_reduce_db_reads() {
+        const DEPTH: usize = 4;
+        const TEST_ADDR: [u8; 32] = [11; 32];
+        const HASH: [u8; 32] = [7u8; 32];
+
+        if let Ok(mut cache) = MERKLE_CACHE.lock() {
+            cache.clear();
+        }
+
+        let mock_db = Rc::new(RefCell::new(MockTreeDB::new()));
+        mock_db
+            .borrow_mut()
+            .merkle
+            .borrow_mut()
+            .insert(
+                HASH,
+                MerkleRecord {
+                    index: 42,
+                    hash: HASH,
+                    data: Some([1u8; 32]),
+                    left: None,
+                    right: None,
+                },
+            );
+
+        let mt = MongoMerkle::<DEPTH>::construct(
+            TEST_ADDR,
+            DEFAULT_HASH_VEC[DEPTH].clone(),
+            Some(mock_db.clone()),
+        );
+
+        let first = mt.get_record(&HASH).unwrap();
+        assert!(first.is_some());
+        assert_eq!(mock_db.borrow().get_calls(), 1);
+
+        let second = mt.get_record(&HASH).unwrap();
+        assert!(second.is_some());
+        assert_eq!(
+            mock_db.borrow().get_calls(),
+            1,
+            "cache hit should avoid extra DB reads"
+        );
+    }
 }
