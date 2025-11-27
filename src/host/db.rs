@@ -683,14 +683,14 @@ mod tests {
 
         // Create the main and record databases
         const OPEN_FILES: i32 = 80000;
-        let db_opts = Options::default();
+        let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
         db_opts.set_max_open_files(OPEN_FILES);
 
-        let merkle_cf_opts = Options::default();
+        let mut merkle_cf_opts = Options::default();
         merkle_cf_opts.set_max_open_files(OPEN_FILES);
-        let data_cf_opts = Options::default();
+        let mut data_cf_opts = Options::default();
         data_cf_opts.set_max_open_files(OPEN_FILES);
 
         let mut db = RocksDB::new_with_options(&main_path, db_opts, merkle_cf_opts, data_cf_opts)?;
@@ -837,4 +837,3 @@ mod tests {
         Ok(())
     }
 }
-
