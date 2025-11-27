@@ -14,8 +14,7 @@ use serde::{
 use crate::host::cache::MERKLE_CACHE;
 use crate::host::db::{MongoDB, RocksDB, TreeDB};
 use crate::host::merkle::{MerkleError, MerkleErrorCode, MerkleNode, MerkleProof, MerkleTree};
-use crate::host::poseidon::MERKLE_HASHER;
-use crate::host::poseidon::MERKLE_LEAF_HASHER;
+use crate::host::poseidon::{with_merkle_hasher, with_merkle_leaf_hasher};
 
 fn deserialize_u256_as_binary<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
 where
@@ -380,7 +379,6 @@ impl MerkleNode<[u8; 32]> for MerkleRecord {
         self.hash
     }
     fn set(&mut self, data: &Vec<u8>) {
-        let mut hasher = MERKLE_LEAF_HASHER.clone();
         self.data = Some(data.clone().try_into().unwrap());
         let batchdata = data
             .chunks(16)
@@ -394,14 +392,17 @@ impl MerkleNode<[u8; 32]> for MerkleRecord {
             .collect::<Vec<Fr>>();
         let values: [Fr; 2] = batchdata.try_into().unwrap();
 
-        cfg_if::cfg_if! {
-            if #[cfg(feature="complex-leaf")] {
-                hasher.update(&values);
-                self.hash = hasher.squeeze().to_repr();
-            } else {
-                self.hash = hasher.update_exact(&values).to_repr();
+        let new_hash = with_merkle_leaf_hasher(|hasher| {
+            cfg_if::cfg_if! {
+                if #[cfg(feature="complex-leaf")] {
+                    hasher.update(&values);
+                    hasher.squeeze().to_repr()
+                } else {
+                    hasher.update_exact(&values).to_repr()
+                }
             }
-        }
+        });
+        self.hash = new_hash;
         //println!("update with values {:?}", values);
         //println!("update with new hash {:?}", self.hash);
     }
@@ -510,10 +511,9 @@ impl<const DEPTH: usize> MerkleTree<[u8; 32], DEPTH> for MongoMerkle<DEPTH> {
     }
 
     fn hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-        let mut hasher = MERKLE_HASHER.clone();
         let a = Fr::from_repr(*a).unwrap();
         let b = Fr::from_repr(*b).unwrap();
-        hasher.update_exact(&[a, b]).to_repr()
+        with_merkle_hasher(|hasher| hasher.update_exact(&[a, b]).to_repr())
     }
 
     fn set_parent(
