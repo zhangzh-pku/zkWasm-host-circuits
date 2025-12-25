@@ -4,18 +4,24 @@ use std::rc::Rc;
 use ff::PrimeField;
 use halo2_proofs::pairing::bn256::Fr;
 use lazy_static;
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::bson::doc;
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::bson::{spec::BinarySubtype, Bson};
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use serde::{
     de::{Error, Unexpected},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
 use crate::host::cache::MERKLE_CACHE;
-use crate::host::db::{MongoDB, RocksDB, TreeDB};
+use crate::host::db::{RocksDB, TreeDB};
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
+use crate::host::db::MongoDB;
 use crate::host::merkle::{MerkleError, MerkleErrorCode, MerkleNode, MerkleProof, MerkleTree};
 use crate::host::poseidon::{with_merkle_hasher, with_merkle_leaf_hasher};
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 fn deserialize_u256_as_binary<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
 where
     D: Deserializer<'de>,
@@ -27,6 +33,7 @@ where
     }
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 fn serialize_bytes_as_binary<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -38,7 +45,10 @@ where
     binary.serialize(serializer)
 }
 
-fn deserialize_option_u256_as_binary<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
+fn deserialize_option_u256_as_binary<'de, D>(
+    deserializer: D,
+) -> Result<Option<[u8; 32]>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -50,6 +60,7 @@ where
     }
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 fn serialize_option_bytes_as_binary<S>(
     bytes: &Option<[u8; 32]>,
     serializer: S,
@@ -211,35 +222,69 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
 
 pub type RocksMerkle<const DEPTH: usize> = MongoMerkle<DEPTH>;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(
+    any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+    derive(Serialize, Deserialize)
+)]
+#[derive(Debug, Clone)]
 pub struct MerkleRecord {
     // The index will not to be stored in db.
-    #[serde(skip_serializing, skip_deserializing, default)]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(skip_serializing, skip_deserializing, default)
+    )]
     pub index: u64,
-    #[serde(serialize_with = "self::serialize_bytes_as_binary")]
-    #[serde(deserialize_with = "self::deserialize_u256_as_binary")]
-    #[serde(rename = "_id")]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(serialize_with = "self::serialize_bytes_as_binary")
+    )]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(deserialize_with = "self::deserialize_u256_as_binary")
+    )]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(rename = "_id")
+    )]
     pub hash: [u8; 32],
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "self::serialize_option_bytes_as_binary",
-        default
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "self::serialize_option_bytes_as_binary",
+            default
+        )
     )]
-    #[serde(deserialize_with = "self::deserialize_option_u256_as_binary")]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(deserialize_with = "self::deserialize_option_u256_as_binary")
+    )]
     pub left: Option<[u8; 32]>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "self::serialize_option_bytes_as_binary",
-        default
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "self::serialize_option_bytes_as_binary",
+            default
+        )
     )]
-    #[serde(deserialize_with = "self::deserialize_option_u256_as_binary")]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(deserialize_with = "self::deserialize_option_u256_as_binary")
+    )]
     pub right: Option<[u8; 32]>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "self::serialize_option_bytes_as_binary",
-        default
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "self::serialize_option_bytes_as_binary",
+            default
+        )
     )]
-    #[serde(deserialize_with = "self::deserialize_option_u256_as_binary")]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(deserialize_with = "self::deserialize_option_u256_as_binary")
+    )]
     pub data: Option<[u8; 32]>,
 }
 
@@ -247,7 +292,8 @@ impl MerkleRecord {
     /// serialize MerkleRecord to Vec<u8> \
     /// Note: index can be ignored as it is not stored in db.
     pub fn to_slice(&self) -> Vec<u8> {
-        let mut result = Vec::new();
+        // Max encoded length: hash(32) + 3 * (flag(1) + value(32)) = 131 bytes.
+        let mut result = Vec::with_capacity(32 + 3 * (1 + 32));
 
         // hash ([u8; 32])
         result.extend_from_slice(&self.hash);
@@ -281,18 +327,14 @@ impl MerkleRecord {
 
     /// deserialize Vec<u8> to MerkleRecord
     pub fn from_slice(slice: &[u8]) -> Result<Self, anyhow::Error> {
-        if slice.len() < 8 {
-            return Err(anyhow::anyhow!("Slice too short for index"));
-        }
-
         let mut pos = 0;
 
         // hash
-        if slice.len() < pos + 32 {
+        if slice.len() < 32 {
             return Err(anyhow::anyhow!("Slice too short for hash"));
         }
         let mut hash = [0u8; 32];
-        hash.copy_from_slice(&slice[pos..pos+32]);
+        hash.copy_from_slice(&slice[pos..pos + 32]);
         pos += 32;
 
         // left
@@ -345,7 +387,7 @@ impl MerkleRecord {
         }
         let data = match slice[pos] {
             0 => {
-                // pos += 1;
+                pos += 1;
                 None
             },
             1 => {
@@ -354,7 +396,8 @@ impl MerkleRecord {
                     return Err(anyhow::anyhow!("Slice too short for data value"));
                 }
                 let mut data_val = [0u8; 32];
-                data_val.copy_from_slice(&slice[pos..pos+32]);
+                data_val.copy_from_slice(&slice[pos..pos + 32]);
+                pos += 32;
                 Some(data_val)
             },
             _ => return Err(anyhow::anyhow!("Invalid data flag")),
@@ -379,18 +422,14 @@ impl MerkleNode<[u8; 32]> for MerkleRecord {
         self.hash
     }
     fn set(&mut self, data: &Vec<u8>) {
-        self.data = Some(data.clone().try_into().unwrap());
-        let batchdata = data
-            .chunks(16)
-            .into_iter()
-            .map(|x| {
-                let mut v = x.to_vec();
-                v.extend_from_slice(&[0u8; 16]);
-                let f = v.try_into().unwrap();
-                Fr::from_repr(f).unwrap()
-            })
-            .collect::<Vec<Fr>>();
-        let values: [Fr; 2] = batchdata.try_into().unwrap();
+        let data: [u8; 32] = data.as_slice().try_into().unwrap();
+        self.data = Some(data);
+
+        let mut left = [0u8; 32];
+        left[..16].copy_from_slice(&data[..16]);
+        let mut right = [0u8; 32];
+        right[..16].copy_from_slice(&data[16..]);
+        let values = [Fr::from_repr(left).unwrap(), Fr::from_repr(right).unwrap()];
 
         let new_hash = with_merkle_leaf_hasher(|hasher| {
             cfg_if::cfg_if! {
@@ -495,10 +534,23 @@ impl<const DEPTH: usize> MerkleTree<[u8; 32], DEPTH> for MongoMerkle<DEPTH> {
     type Node = MerkleRecord;
 
     fn construct(addr: Self::Id, root: Self::Root, db: Option<Rc<RefCell<dyn TreeDB>>>) -> Self {
+        #[cfg(not(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
+        let _ = addr;
         MongoMerkle {
             root_hash: root,
             default_hash: DEFAULT_HASH_VEC.clone(),
-            db: db.unwrap_or_else(|| Rc::new(RefCell::new(MongoDB::new(addr, None)))),
+            db: db.unwrap_or_else(|| {
+                #[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
+                {
+                    Rc::new(RefCell::new(MongoDB::new(addr, None)))
+                }
+                #[cfg(not(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
+                {
+                    panic!(
+                        "MongoMerkle::construct requires an explicit `db` when MongoDB features are disabled"
+                    )
+                }
+            }),
         }
     }
 
@@ -583,26 +635,25 @@ impl<const DEPTH: usize> MerkleTree<[u8; 32], DEPTH> for MongoMerkle<DEPTH> {
         index: u64,
     ) -> Result<(Self::Node, MerkleProof<[u8; 32], DEPTH>), MerkleError> {
         self.leaf_check(index)?;
-        let paths = self.get_path(index)?.to_vec();
-        // We push the search from the top
-        let hash = self.get_root_hash();
+        let paths = self.get_path(index)?;
+        // Walk down from root collecting sibling hashes.
+        let mut hash = self.get_root_hash();
         let mut acc = 0;
         let mut acc_node = self.generate_or_get_node(acc, &hash)?;
-        let assist: Vec<[u8; 32]> = paths
-            .into_iter()
-            .map(|child| {
-                let (hash, sibling_hash) = if (acc + 1) * 2 == child + 1 {
-                    // left child
-                    (acc_node.left().unwrap(), acc_node.right().unwrap())
-                } else {
-                    assert_eq!((acc + 1) * 2, child);
-                    (acc_node.right().unwrap(), acc_node.left().unwrap())
-                };
-                acc = child;
-                acc_node = self.generate_or_get_node(acc, &hash)?;
-                Ok(sibling_hash)
-            })
-            .collect::<Result<Vec<[u8; 32]>, _>>()?;
+        let mut assist: Vec<[u8; 32]> = Vec::with_capacity(DEPTH);
+        for child in paths.iter() {
+            let (child_hash, sibling_hash) = if (acc + 1) * 2 == child + 1 {
+                // left child
+                (acc_node.left().unwrap(), acc_node.right().unwrap())
+            } else {
+                assert_eq!((acc + 1) * 2, *child);
+                (acc_node.right().unwrap(), acc_node.left().unwrap())
+            };
+            assist.push(sibling_hash);
+            acc = *child;
+            hash = child_hash;
+            acc_node = self.generate_or_get_node(acc, &hash)?;
+        }
         let hash = acc_node.hash();
         Ok((
             acc_node,
@@ -622,7 +673,7 @@ impl<const DEPTH: usize> MerkleTree<[u8; 32], DEPTH> for MongoMerkle<DEPTH> {
     ) -> Result<MerkleProof<[u8; 32], DEPTH>, MerkleError> {
         self.leaf_check(index)?;
 
-        let paths = self.get_path(index)?.to_vec();
+        let paths = self.get_path(index)?;
         let mut proof_assist: Vec<[u8; 32]> = Vec::with_capacity(DEPTH);
         let mut path_meta: Vec<(u64, bool, [u8; 32])> = Vec::with_capacity(DEPTH);
 
@@ -689,6 +740,7 @@ impl<const DEPTH: usize> MerkleTree<[u8; 32], DEPTH> for MongoMerkle<DEPTH> {
 }
 
 impl<const DEPTH: usize> MongoMerkle<DEPTH> {
+    #[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
     pub fn default() -> Self {
         let addr = [0u8; 32];
         MongoMerkle {
@@ -699,7 +751,7 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
 mod tests {
     use super::{MerkleRecord, MongoMerkle, DEFAULT_HASH_VEC, RocksMerkle};
     use crate::host::cache::MERKLE_CACHE;

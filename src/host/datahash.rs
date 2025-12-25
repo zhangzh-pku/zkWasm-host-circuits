@@ -3,17 +3,21 @@ use std::rc::Rc;
 
 use ff::PrimeField;
 use halo2_proofs::pairing::bn256::Fr;
-use mongodb::bson::doc;
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::bson::{spec::BinarySubtype, Bson};
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use serde::{
     de::{Error, Unexpected},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
 //use lazy_static;
-use crate::host::db::{MongoDB, TreeDB};
+use crate::host::db::TreeDB;
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
+use crate::host::db::MongoDB;
 use crate::host::poseidon::POSEIDON_HASHER;
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 fn deserialize_u256_from_binary<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
 where
     D: Deserializer<'de>,
@@ -25,6 +29,7 @@ where
     }
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 fn deserialize_bytes_from_binary<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
@@ -36,6 +41,7 @@ where
     }
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 fn serialize_bytes_as_binary<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -72,8 +78,21 @@ impl PartialEq for DataHashRecord {
 
 impl MongoDataHash {
     pub fn construct(addr: [u8; 32], db: Option<Rc<RefCell<dyn TreeDB>>>) -> Self {
+        #[cfg(not(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
+        let _ = addr;
         MongoDataHash {
-            db: db.unwrap_or_else(|| Rc::new(RefCell::new(MongoDB::new(addr, None)))),
+            db: db.unwrap_or_else(|| {
+                #[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
+                {
+                    Rc::new(RefCell::new(MongoDB::new(addr, None)))
+                }
+                #[cfg(not(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
+                {
+                    panic!(
+                        "MongoDataHash::construct requires an explicit `db` when MongoDB features are disabled"
+                    )
+                }
+            }),
         }
     }
 
@@ -89,21 +108,40 @@ impl MongoDataHash {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(
+    any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+    derive(Serialize, Deserialize)
+)]
+#[derive(Debug, Clone)]
 pub struct DataHashRecord {
-    #[serde(serialize_with = "self::serialize_bytes_as_binary")]
-    #[serde(deserialize_with = "self::deserialize_u256_from_binary")]
-    #[serde(rename = "_id")]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(serialize_with = "self::serialize_bytes_as_binary")
+    )]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(deserialize_with = "self::deserialize_u256_from_binary")
+    )]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(rename = "_id")
+    )]
     pub hash: [u8; 32],
-    #[serde(serialize_with = "self::serialize_bytes_as_binary")]
-    #[serde(deserialize_with = "self::deserialize_bytes_from_binary")]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(serialize_with = "self::serialize_bytes_as_binary")
+    )]
+    #[cfg_attr(
+        any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"),
+        serde(deserialize_with = "self::deserialize_bytes_from_binary")
+    )]
     pub data: Vec<u8>,
 }
 
 impl DataHashRecord {
     /// 将DataHashRecord转换为Vec<u8>
     pub fn to_slice(&self) -> Vec<u8> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(32 + 4 + self.data.len());
 
         // hash ([u8; 32])
         result.extend_from_slice(&self.hash);

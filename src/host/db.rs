@@ -1,7 +1,12 @@
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::bson::{spec::BinarySubtype, to_bson, Bson};
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::error::{Error, ErrorKind};
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::options::{InsertManyOptions, UpdateOptions};
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::results::InsertManyResult;
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::{
     bson::doc,
     options::DropCollectionOptions,
@@ -15,9 +20,13 @@ use rocksdb::{DB, Options, WriteBatch};
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 pub const MONGODB_DATABASE: &str = "zkwasm-mongo-merkle";
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 pub const MONGODB_MERKLE_NAME_PREFIX: &str = "MERKLEDATA";
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 pub const MONGODB_DATA_NAME_PREFIX: &str = "DATAHASH";
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 const DUPLICATE_KEY_ERROR_CODE: i32 = 11000;
 
 pub trait TreeDB {
@@ -38,12 +47,18 @@ pub trait TreeDB {
     fn is_recording(&self) -> bool;
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 #[derive(Clone)]
 pub struct MongoDB {
     cname_id: [u8; 32],
     client: Client,
 }
 
+#[cfg(not(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
+#[derive(Clone)]
+pub struct MongoDB;
+
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 impl MongoDB {
     pub fn new(cname_id: [u8; 32], uri: Option<String>) -> Self {
         let uri = uri.map_or("mongodb://localhost:27017".to_string(), |x| x.clone());
@@ -52,6 +67,14 @@ impl MongoDB {
     }
 }
 
+#[cfg(not(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
+impl MongoDB {
+    pub fn new(_cname_id: [u8; 32], _uri: Option<String>) -> Self {
+        panic!("MongoDB support requires enabling `mongo-std-sync` or `mongo-tokio-sync`");
+    }
+}
+
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 impl MongoDB {
     pub fn get_collection<T>(
         &self,
@@ -88,6 +111,7 @@ impl MongoDB {
     }
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 impl TreeDB for MongoDB {
     fn get_merkle_record(&self, hash: &[u8; 32]) -> Result<Option<MerkleRecord>, anyhow::Error> {
         let collection = self.merkel_collection()?;
@@ -149,6 +173,7 @@ impl TreeDB for MongoDB {
     }
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 pub fn filter_duplicate_key_error(
     result: mongodb::error::Result<InsertManyResult>,
 ) -> Option<Error> {
@@ -170,6 +195,7 @@ pub fn filter_duplicate_key_error(
     }
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 pub fn u256_to_bson(x: &[u8; 32]) -> Bson {
     Bson::Binary(mongodb::bson::Binary {
         subtype: BinarySubtype::Generic,
@@ -177,6 +203,7 @@ pub fn u256_to_bson(x: &[u8; 32]) -> Bson {
     })
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 pub fn u64_to_bson(x: u64) -> Bson {
     Bson::Binary(mongodb::bson::Binary {
         subtype: BinarySubtype::Generic,
@@ -184,6 +211,7 @@ pub fn u64_to_bson(x: u64) -> Bson {
     })
 }
 
+#[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 pub fn get_collection<T>(
     client: &Client,
     database: String,
@@ -322,18 +350,24 @@ impl TreeDB for RocksDB {
         let cf = self.db.cf_handle(&self.merkle_cf_name)
             .ok_or_else(|| anyhow::anyhow!("Merkle column family not found"))?;
 
-        match self.db.get_cf(cf, hash.clone())? {
-            Some(data) => {
-                let record = MerkleRecord::from_slice(&data)?;
-                if self.record_db.is_some() {
-                    let record_db = self.record_db.clone().unwrap();
-                    let cf = record_db.db.cf_handle(&self.merkle_cf_name)
+        if let Some(record_db) = self.record_db.as_ref() {
+            match self.db.get_cf(cf, hash)? {
+                Some(data) => {
+                    let record = MerkleRecord::from_slice(&data)?;
+                    let record_db_cf = record_db
+                        .db
+                        .cf_handle(&record_db.merkle_cf_name)
                         .ok_or_else(|| anyhow::anyhow!("Merkle column family not found"))?;
-                    record_db.db.put_cf(cf, hash, data)?;
+                    record_db.db.put_cf(record_db_cf, hash, &data)?;
+                    Ok(Some(record))
                 }
-                Ok(Some(record))
-            },
-            None => Ok(None),
+                None => Ok(None),
+            }
+        } else {
+            match self.db.get_pinned_cf(cf, hash)? {
+                Some(data) => Ok(Some(MerkleRecord::from_slice(data.as_ref())?)),
+                None => Ok(None),
+            }
         }
     }
 
@@ -347,12 +381,13 @@ impl TreeDB for RocksDB {
             .ok_or_else(|| anyhow::anyhow!("Merkle column family not found"))?;
 
         let serialized = record.to_slice();
-        self.db.put_cf(cf, &record.hash, serialized.clone())?;
-        if self.record_db.is_some() {
-            let record_db = self.record_db.clone().unwrap();
-            let cf = record_db.db.cf_handle(&record_db.merkle_cf_name)
+        self.db.put_cf(cf, &record.hash, &serialized)?;
+        if let Some(record_db) = self.record_db.as_ref() {
+            let record_db_cf = record_db
+                .db
+                .cf_handle(&record_db.merkle_cf_name)
                 .ok_or_else(|| anyhow::anyhow!("Merkle column family not found"))?;
-            record_db.db.put_cf(cf, record.hash, serialized)?;
+            record_db.db.put_cf(record_db_cf, &record.hash, &serialized)?;
         }
         Ok(())
     }
@@ -375,15 +410,15 @@ impl TreeDB for RocksDB {
             }
             self.db.write(batch)?;
         } else {
-            let record_db = self.record_db.clone().unwrap();
+            let record_db = self.record_db.as_ref().unwrap();
             let record_db_cf = record_db.db.cf_handle(&record_db.merkle_cf_name)
                 .ok_or_else(|| anyhow::anyhow!("Merkle column family not found"))?;
             let mut batch = WriteBatch::default();
             let mut record_db_batch = WriteBatch::default();
             for record in records {
                 let serialized = record.to_slice();
-                batch.put_cf(cf, &record.hash, serialized.clone());
-                record_db_batch.put_cf(record_db_cf, &record.hash, serialized);
+                batch.put_cf(cf, &record.hash, &serialized);
+                record_db_batch.put_cf(record_db_cf, &record.hash, &serialized);
             }
             self.db.write(batch)?;
             record_db.db.write(record_db_batch)?;
@@ -395,18 +430,24 @@ impl TreeDB for RocksDB {
         let cf = self.db.cf_handle(&self.data_cf_name)
             .ok_or_else(|| anyhow::anyhow!("Data column family not found"))?;
 
-        match self.db.get_cf(cf, hash)? {
-            Some(data) => {
-                let record = DataHashRecord::from_slice(&data)?;
-                if self.record_db.is_some() {
-                    let record_db = self.record_db.clone().unwrap();
-                    let cf = record_db.db.cf_handle(&record_db.data_cf_name)
+        if let Some(record_db) = self.record_db.as_ref() {
+            match self.db.get_cf(cf, hash)? {
+                Some(data) => {
+                    let record = DataHashRecord::from_slice(&data)?;
+                    let record_db_cf = record_db
+                        .db
+                        .cf_handle(&record_db.data_cf_name)
                         .ok_or_else(|| anyhow::anyhow!("Data column family not found"))?;
-                    record_db.db.put_cf(cf, &record.hash, data)?;
+                    record_db.db.put_cf(record_db_cf, hash, &data)?;
+                    Ok(Some(record))
                 }
-                Ok(Some(record))
-            },
-            None => Ok(None),
+                None => Ok(None),
+            }
+        } else {
+            match self.db.get_pinned_cf(cf, hash)? {
+                Some(data) => Ok(Some(DataHashRecord::from_slice(data.as_ref())?)),
+                None => Ok(None),
+            }
         }
     }
 
@@ -420,12 +461,13 @@ impl TreeDB for RocksDB {
             .ok_or_else(|| anyhow::anyhow!("Data column family not found"))?;
 
         let serialized = record.to_slice();
-        self.db.put_cf(cf, &record.hash, serialized.clone())?;
-        if self.record_db.is_some() {
-            let record_db = self.record_db.clone().unwrap();
-            let cf = record_db.db.cf_handle(&record_db.data_cf_name)
+        self.db.put_cf(cf, &record.hash, &serialized)?;
+        if let Some(record_db) = self.record_db.as_ref() {
+            let record_db_cf = record_db
+                .db
+                .cf_handle(&record_db.data_cf_name)
                 .ok_or_else(|| anyhow::anyhow!("Data column family not found"))?;
-            record_db.db.put_cf(cf, &record.hash, serialized)?;
+            record_db.db.put_cf(record_db_cf, &record.hash, &serialized)?;
         }
         Ok(())
     }
