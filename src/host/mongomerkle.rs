@@ -97,21 +97,71 @@ impl PartialEq for MerkleRecord {
 }
 
 impl<const DEPTH: usize> MongoMerkle<DEPTH> {
+    fn cache_shard(&self, hash: &[u8; 32]) -> usize {
+        let shards = MERKLE_CACHE.len();
+        if shards <= 1 {
+            return 0;
+        }
+        let mut prefix = [0u8; 8];
+        prefix.copy_from_slice(&hash[..8]);
+        (u64::from_le_bytes(prefix) as usize) % shards
+    }
+
     fn cache_get(&self, hash: &[u8; 32]) -> Option<Option<MerkleRecord>> {
+        let shard = self.cache_shard(hash);
         MERKLE_CACHE
-            .lock()
-            .ok()
+            .get(shard)
+            .and_then(|shard| shard.lock().ok())
             .and_then(|mut cache| cache.get(hash).cloned())
     }
 
     fn cache_put(&self, hash: [u8; 32], record: Option<MerkleRecord>) {
-        if let Ok(mut cache) = MERKLE_CACHE.lock() {
-            cache.put(hash, record);
+        let shard = self.cache_shard(&hash);
+        if let Some(shard) = MERKLE_CACHE.get(shard) {
+            if let Ok(mut cache) = shard.lock() {
+                cache.put(hash, record);
+            }
         }
     }
 
     fn cache_put_record(&self, record: &MerkleRecord) {
         self.cache_put(record.hash, Some(record.clone()));
+    }
+
+    fn cache_put_records(&self, records: &[MerkleRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let shards = MERKLE_CACHE.len();
+        if shards <= 1 {
+            if let Some(shard) = MERKLE_CACHE.get(0) {
+                if let Ok(mut cache) = shard.lock() {
+                    for record in records {
+                        cache.put(record.hash, Some(record.clone()));
+                    }
+                }
+            }
+            return;
+        }
+
+        let mut buckets: Vec<Vec<&MerkleRecord>> = vec![Vec::new(); shards];
+        for record in records {
+            buckets[self.cache_shard(&record.hash)].push(record);
+        }
+        for (i, bucket) in buckets.into_iter().enumerate() {
+            if bucket.is_empty() {
+                continue;
+            }
+            let Some(shard) = MERKLE_CACHE.get(i) else {
+                continue;
+            };
+            let Ok(mut cache) = shard.lock() else {
+                continue;
+            };
+            for record in bucket {
+                cache.put(record.hash, Some(record.clone()));
+            }
+        }
     }
 
     pub fn get_record(&self, hash: &[u8; 32]) -> Result<Option<MerkleRecord>, anyhow::Error> {
@@ -139,9 +189,7 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
     //the input records must be in one leaf path
     pub fn update_records(&mut self, records: &Vec<MerkleRecord>) -> Result<(), anyhow::Error> {
         self.db.borrow_mut().set_merkle_records(records)?;
-        for record in records.iter() {
-            self.cache_put_record(record);
-        }
+        self.cache_put_records(records);
         Ok(())
     }
 
