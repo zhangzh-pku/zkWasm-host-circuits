@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use ff::PrimeField;
@@ -266,6 +267,157 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
     fn is_recording(&self) -> bool {
         self.db.borrow().is_recording()
     }
+
+    fn hash_leaf_data(data: &[u8; 32]) -> [u8; 32] {
+        let mut left = [0u8; 32];
+        left[..16].copy_from_slice(&data[..16]);
+        let mut right = [0u8; 32];
+        right[..16].copy_from_slice(&data[16..]);
+        let values = [
+            Fr::from_repr_vartime(left).unwrap(),
+            Fr::from_repr_vartime(right).unwrap(),
+        ];
+        with_merkle_leaf_hasher(|hasher| {
+            cfg_if::cfg_if! {
+                if #[cfg(feature="complex-leaf")] {
+                    hasher.update(&values);
+                    hasher.squeeze().to_repr()
+                } else {
+                    hasher.update_exact(&values).to_repr()
+                }
+            }
+        })
+    }
+
+    /// Apply multiple leaf updates and compute the final root in a single pass.
+    ///
+    /// This is intended for high-throughput `apply_txs_final` paths where only the final root is
+    /// required. It deduplicates repeated leaf indices with "last write wins".
+    pub fn update_leaves_batch(&mut self, updates: &Vec<(u64, [u8; 32])>) -> Result<(), MerkleError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        let mut leaf_updates: HashMap<u64, [u8; 32]> = HashMap::with_capacity(updates.len());
+        for (index, data) in updates {
+            self.leaf_check(*index)?;
+            leaf_updates.insert(*index, *data);
+        }
+
+        let mut affected: HashSet<u64> = HashSet::with_capacity(leaf_updates.len() * (DEPTH + 1));
+        affected.insert(0);
+        for (&leaf, _) in leaf_updates.iter() {
+            let mut cur = leaf;
+            loop {
+                affected.insert(cur);
+                if cur == 0 {
+                    break;
+                }
+                cur = (cur - 1) / 2;
+            }
+        }
+
+        // Load old child hashes for all affected internal nodes by walking down from the current root.
+        let mut old_children: HashMap<u64, ([u8; 32], [u8; 32])> =
+            HashMap::with_capacity(affected.len().min(1 << 20));
+        let mut queue: VecDeque<(u64, [u8; 32])> = VecDeque::new();
+        queue.push_back((0, self.get_root_hash()));
+        while let Some((index, hash)) = queue.pop_front() {
+            let height = (index + 1).ilog2() as usize;
+            if height >= DEPTH {
+                continue;
+            }
+
+            let node = self.get_node_with_hash(index, &hash)?;
+            let left_hash = node
+                .left()
+                .ok_or_else(|| MerkleError::new(hash, index, MerkleErrorCode::UnexpectedDBError))?;
+            let right_hash = node
+                .right()
+                .ok_or_else(|| MerkleError::new(hash, index, MerkleErrorCode::UnexpectedDBError))?;
+
+            old_children.insert(index, (left_hash, right_hash));
+
+            let left_index = index
+                .checked_mul(2)
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(|| MerkleError::new(hash, index, MerkleErrorCode::InvalidIndex))?;
+            let right_index = left_index
+                .checked_add(1)
+                .ok_or_else(|| MerkleError::new(hash, index, MerkleErrorCode::InvalidIndex))?;
+
+            if affected.contains(&left_index) {
+                queue.push_back((left_index, left_hash));
+            }
+            if affected.contains(&right_index) {
+                queue.push_back((right_index, right_hash));
+            }
+        }
+
+        let mut new_hashes: HashMap<u64, [u8; 32]> = HashMap::with_capacity(affected.len());
+        let mut records: Vec<MerkleRecord> = Vec::with_capacity(affected.len());
+
+        for (&leaf_index, data) in leaf_updates.iter() {
+            let leaf_hash = Self::hash_leaf_data(data);
+            new_hashes.insert(leaf_index, leaf_hash);
+            records.push(MerkleRecord {
+                index: leaf_index,
+                hash: leaf_hash,
+                left: None,
+                right: None,
+                data: Some(*data),
+            });
+        }
+
+        let mut indices: Vec<u64> = affected.into_iter().collect();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+
+        for index in indices {
+            let height = (index + 1).ilog2() as usize;
+            if height >= DEPTH {
+                continue;
+            }
+
+            let left_index = index
+                .checked_mul(2)
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
+            let right_index = left_index
+                .checked_add(1)
+                .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
+
+            let (old_left, old_right) = old_children.get(&index).ok_or_else(|| {
+                MerkleError::new(self.get_root_hash(), index, MerkleErrorCode::RecordNotFound)
+            })?;
+
+            let left_hash = new_hashes.get(&left_index).copied().unwrap_or(*old_left);
+            let right_hash = new_hashes.get(&right_index).copied().unwrap_or(*old_right);
+            let parent_hash = Self::hash(&left_hash, &right_hash);
+            new_hashes.insert(index, parent_hash);
+
+            let default_hash = self.get_default_hash(height)?;
+            if parent_hash == default_hash {
+                continue;
+            }
+
+            records.push(MerkleRecord {
+                index,
+                hash: parent_hash,
+                left: Some(left_hash),
+                right: Some(right_hash),
+                data: None,
+            });
+        }
+
+        let new_root = new_hashes
+            .get(&0)
+            .copied()
+            .ok_or_else(|| MerkleError::new(self.get_root_hash(), 0, MerkleErrorCode::UnexpectedDBError))?;
+        self.update_records(&records)
+            .map_err(|_| MerkleError::new(new_root, 0, MerkleErrorCode::UnexpectedDBError))?;
+        self.update_root_hash(&new_root);
+        Ok(())
+    }
 }
 
 pub type RocksMerkle<const DEPTH: usize> = MongoMerkle<DEPTH>;
@@ -477,7 +629,10 @@ impl MerkleNode<[u8; 32]> for MerkleRecord {
         left[..16].copy_from_slice(&data[..16]);
         let mut right = [0u8; 32];
         right[..16].copy_from_slice(&data[16..]);
-        let values = [Fr::from_repr(left).unwrap(), Fr::from_repr(right).unwrap()];
+        let values = [
+            Fr::from_repr_vartime(left).unwrap(),
+            Fr::from_repr_vartime(right).unwrap(),
+        ];
 
         let new_hash = with_merkle_leaf_hasher(|hasher| {
             cfg_if::cfg_if! {
@@ -611,8 +766,8 @@ impl<const DEPTH: usize> MerkleTree<[u8; 32], DEPTH> for MongoMerkle<DEPTH> {
     }
 
     fn hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-        let a = Fr::from_repr(*a).unwrap();
-        let b = Fr::from_repr(*b).unwrap();
+        let a = Fr::from_repr_vartime(*a).unwrap();
+        let b = Fr::from_repr_vartime(*b).unwrap();
         with_merkle_hasher(|hasher| hasher.update_exact(&[a, b]).to_repr())
     }
 
@@ -814,6 +969,14 @@ mod tests {
     use std::collections::HashMap;
     use std::rc::Rc;
     use std::time::Instant;
+
+    fn clear_merkle_cache() {
+        for shard in MERKLE_CACHE.iter() {
+            if let Ok(mut cache) = shard.lock() {
+                cache.clear();
+            }
+        }
+    }
 
     #[test]
     /* Test for check parent node
@@ -1280,9 +1443,7 @@ mod tests {
         const TEST_ADDR: [u8; 32] = [9; 32];
         const INDEX: u64 = (1u64 << DEPTH) - 1;
 
-        if let Ok(mut cache) = MERKLE_CACHE.lock() {
-            cache.clear();
-        }
+        clear_merkle_cache();
 
         let mock_db = Rc::new(RefCell::new(MockTreeDB::new()));
         let mut mt = MongoMerkle::<DEPTH>::construct(
@@ -1310,9 +1471,7 @@ mod tests {
         const TEST_ADDR: [u8; 32] = [10; 32];
         const INDEX: u64 = (1u64 << DEPTH) - 1;
 
-        if let Ok(mut cache) = MERKLE_CACHE.lock() {
-            cache.clear();
-        }
+        clear_merkle_cache();
 
         let mock_db = Rc::new(RefCell::new(MockTreeDB::new()));
         let mut mt = MongoMerkle::<DEPTH>::construct(
@@ -1325,9 +1484,7 @@ mod tests {
         mt.update_leaf_data_with_proof(INDEX, &data).unwrap();
 
         mock_db.borrow().reset_calls();
-        if let Ok(mut cache) = MERKLE_CACHE.lock() {
-            cache.clear();
-        }
+        clear_merkle_cache();
 
         let data2 = vec![2u8; 32];
         mt.update_leaf_data_with_proof(INDEX, &data2).unwrap();
@@ -1347,9 +1504,7 @@ mod tests {
         const TEST_ADDR: [u8; 32] = [11; 32];
         const HASH: [u8; 32] = [7u8; 32];
 
-        if let Ok(mut cache) = MERKLE_CACHE.lock() {
-            cache.clear();
-        }
+        clear_merkle_cache();
 
         let mock_db = Rc::new(RefCell::new(MockTreeDB::new()));
         mock_db
@@ -1384,5 +1539,128 @@ mod tests {
             1,
             "cache hit should avoid extra DB reads"
         );
+    }
+
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::{MerkleRecord, MongoMerkle, DEFAULT_HASH_VEC};
+    use crate::host::cache::MERKLE_CACHE;
+    use crate::host::datahash::DataHashRecord;
+    use crate::host::db::{RocksDB, TreeDB};
+    use crate::host::merkle::MerkleTree;
+    use anyhow::{anyhow, Result as AnyResult};
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn clear_merkle_cache() {
+        for shard in MERKLE_CACHE.iter() {
+            if let Ok(mut cache) = shard.lock() {
+                cache.clear();
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct MockTreeDB {
+        merkle: RefCell<HashMap<[u8; 32], MerkleRecord>>,
+        data: RefCell<HashMap<[u8; 32], DataHashRecord>>,
+        get_merkle_calls: Cell<usize>,
+    }
+
+    impl MockTreeDB {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl TreeDB for MockTreeDB {
+        fn get_merkle_record(&self, hash: &[u8; 32]) -> AnyResult<Option<MerkleRecord>> {
+            self.get_merkle_calls
+                .set(self.get_merkle_calls.get() + 1);
+            Ok(self.merkle.borrow().get(hash).cloned())
+        }
+
+        fn set_merkle_record(&mut self, record: MerkleRecord) -> AnyResult<()> {
+            self.merkle.borrow_mut().insert(record.hash, record);
+            Ok(())
+        }
+
+        fn set_merkle_records(&mut self, records: &Vec<MerkleRecord>) -> AnyResult<()> {
+            for record in records.iter() {
+                self.merkle.borrow_mut().insert(record.hash, record.clone());
+            }
+            Ok(())
+        }
+
+        fn get_data_record(&self, hash: &[u8; 32]) -> AnyResult<Option<DataHashRecord>> {
+            Ok(self.data.borrow().get(hash).cloned())
+        }
+
+        fn set_data_record(&mut self, record: DataHashRecord) -> AnyResult<()> {
+            self.data.borrow_mut().insert(record.hash, record);
+            Ok(())
+        }
+
+        fn set_data_records(&mut self, records: &Vec<DataHashRecord>) -> AnyResult<()> {
+            for record in records {
+                self.data.borrow_mut().insert(record.hash, record.clone());
+            }
+            Ok(())
+        }
+
+        fn start_record(&mut self, _record_db: RocksDB) -> AnyResult<()> {
+            Ok(())
+        }
+
+        fn stop_record(&mut self) -> AnyResult<RocksDB> {
+            Err(anyhow!("not supported"))
+        }
+
+        fn is_recording(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_update_leaves_batch_matches_sequential() {
+        const DEPTH: usize = 6;
+        const TEST_ADDR: [u8; 32] = [12; 32];
+        const FIRST_LEAF: u64 = (1u64 << DEPTH) - 1;
+
+        clear_merkle_cache();
+        let mock_db = Rc::new(RefCell::new(MockTreeDB::new()));
+        let mut mt_seq = MongoMerkle::<DEPTH>::construct(
+            TEST_ADDR,
+            DEFAULT_HASH_VEC[DEPTH].clone(),
+            Some(mock_db.clone()),
+        );
+
+        let updates: Vec<(u64, [u8; 32])> = vec![
+            (FIRST_LEAF + 3, [1u8; 32]),
+            (FIRST_LEAF + 17, [2u8; 32]),
+            (FIRST_LEAF + 3, [3u8; 32]), // duplicate: last write wins
+        ];
+
+        for (index, data) in updates.iter() {
+            mt_seq
+                .update_leaf_data_with_proof(*index, &data.to_vec())
+                .unwrap();
+        }
+        let root_seq = mt_seq.get_root_hash();
+
+        clear_merkle_cache();
+        let mock_db = Rc::new(RefCell::new(MockTreeDB::new()));
+        let mut mt_batch = MongoMerkle::<DEPTH>::construct(
+            TEST_ADDR,
+            DEFAULT_HASH_VEC[DEPTH].clone(),
+            Some(mock_db.clone()),
+        );
+        mt_batch.update_leaves_batch(&updates).unwrap();
+        let root_batch = mt_batch.get_root_hash();
+
+        assert_eq!(root_batch, root_seq);
     }
 }
