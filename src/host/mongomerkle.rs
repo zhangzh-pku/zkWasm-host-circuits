@@ -112,16 +112,13 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
         let shard = self.cache_shard(hash);
         MERKLE_CACHE
             .get(shard)
-            .and_then(|shard| shard.lock().ok())
-            .and_then(|mut cache| cache.get(hash).cloned())
+            .and_then(|shard| shard.lock().get(hash).cloned())
     }
 
     fn cache_put(&self, hash: [u8; 32], record: Option<MerkleRecord>) {
         let shard = self.cache_shard(&hash);
         if let Some(shard) = MERKLE_CACHE.get(shard) {
-            if let Ok(mut cache) = shard.lock() {
-                cache.put(hash, record);
-            }
+            shard.lock().put(hash, record);
         }
     }
 
@@ -136,10 +133,9 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
         let shards = MERKLE_CACHE.len();
         if shards <= 1 {
             if let Some(shard) = MERKLE_CACHE.get(0) {
-                if let Ok(mut cache) = shard.lock() {
-                    for record in records {
-                        cache.put(record.hash, Some(record.clone()));
-                    }
+                let mut cache = shard.lock();
+                for record in records {
+                    cache.put(record.hash, Some(record.clone()));
                 }
             }
             return;
@@ -156,9 +152,7 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
             let Some(shard) = MERKLE_CACHE.get(i) else {
                 continue;
             };
-            let Ok(mut cache) = shard.lock() else {
-                continue;
-            };
+            let mut cache = shard.lock();
             for record in bucket {
                 cache.put(record.hash, Some(record.clone()));
             }
@@ -972,9 +966,7 @@ mod tests {
 
     fn clear_merkle_cache() {
         for shard in MERKLE_CACHE.iter() {
-            if let Ok(mut cache) = shard.lock() {
-                cache.clear();
-            }
+            shard.lock().clear();
         }
     }
 
@@ -1557,9 +1549,7 @@ mod batch_tests {
 
     fn clear_merkle_cache() {
         for shard in MERKLE_CACHE.iter() {
-            if let Ok(mut cache) = shard.lock() {
-                cache.clear();
-            }
+            shard.lock().clear();
         }
     }
 

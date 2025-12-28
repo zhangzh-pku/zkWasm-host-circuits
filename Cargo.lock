@@ -3896,6 +3896,7 @@ dependencies = [
  "num-bigint",
  "num-derive",
  "num-traits",
+ "parking_lot",
  "poseidon",
  "rand",
  "rand_core",

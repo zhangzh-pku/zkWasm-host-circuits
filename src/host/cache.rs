@@ -1,8 +1,8 @@
 use crate::host::datahash::DataHashRecord;
 use crate::host::mongomerkle::MerkleRecord;
 use lru::LruCache;
+use parking_lot::Mutex;
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
 
 // If maxsize is set to None, the LRU feature is disabled and the cache can grow without bound.
 // The LRU feature performs best when maxsize is a power-of-two.
