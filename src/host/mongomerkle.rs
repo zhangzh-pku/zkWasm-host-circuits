@@ -1254,6 +1254,13 @@ mod tests {
             Ok(())
         }
 
+        fn set_data_records(&mut self, records: &Vec<DataHashRecord>) -> AnyResult<()> {
+            for record in records {
+                self.data.borrow_mut().insert(record.hash, record.clone());
+            }
+            Ok(())
+        }
+
         fn start_record(&mut self, _record_db: RocksDB) -> AnyResult<()> {
             Ok(())
         }

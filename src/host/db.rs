@@ -40,6 +40,8 @@ pub trait TreeDB {
 
     fn set_data_record(&mut self, record: DataHashRecord) -> Result<(), anyhow::Error>;
 
+    fn set_data_records(&mut self, records: &Vec<DataHashRecord>) -> Result<(), anyhow::Error>;
+
     fn start_record(&mut self, record_db: RocksDB) -> Result<()>;
 
     fn stop_record(&mut self) -> Result<RocksDB>;
@@ -157,6 +159,16 @@ impl TreeDB for MongoDB {
         let update = doc! {"$set": record_doc};
         let collection = self.data_collection()?;
         collection.update_one(filter, update, options)?;
+        Ok(())
+    }
+
+    fn set_data_records(&mut self, records: &Vec<DataHashRecord>) -> Result<(), anyhow::Error> {
+        let options = InsertManyOptions::builder().ordered(false).build();
+        let collection = self.data_collection()?;
+        let ret = collection.insert_many(records, options);
+        if let Some(e) = filter_duplicate_key_error(ret) {
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -468,6 +480,45 @@ impl TreeDB for RocksDB {
                 .cf_handle(&record_db.data_cf_name)
                 .ok_or_else(|| anyhow::anyhow!("Data column family not found"))?;
             record_db.db.put_cf(record_db_cf, &record.hash, &serialized)?;
+        }
+        Ok(())
+    }
+
+    fn set_data_records(&mut self, records: &Vec<DataHashRecord>) -> Result<()> {
+        let cf = self
+            .db
+            .cf_handle(&self.data_cf_name)
+            .ok_or_else(|| anyhow::anyhow!("Data column family not found"))?;
+
+        if self.read_only {
+            for record in records {
+                self.validate_data_record_set_for_read_only(record)?;
+            }
+            return Ok(());
+        }
+
+        if !self.record_db.is_some() {
+            let mut batch = WriteBatch::default();
+            for record in records {
+                let serialized = record.to_slice();
+                batch.put_cf(cf, &record.hash, serialized);
+            }
+            self.db.write(batch)?;
+        } else {
+            let record_db = self.record_db.as_ref().unwrap();
+            let record_db_cf = record_db
+                .db
+                .cf_handle(&record_db.data_cf_name)
+                .ok_or_else(|| anyhow::anyhow!("Data column family not found"))?;
+            let mut batch = WriteBatch::default();
+            let mut record_db_batch = WriteBatch::default();
+            for record in records {
+                let serialized = record.to_slice();
+                batch.put_cf(cf, &record.hash, &serialized);
+                record_db_batch.put_cf(record_db_cf, &record.hash, &serialized);
+            }
+            self.db.write(batch)?;
+            record_db.db.write(record_db_batch)?;
         }
         Ok(())
     }
