@@ -5,6 +5,7 @@ use std::rc::Rc;
 use ff::PrimeField;
 use halo2_proofs::pairing::bn256::Fr;
 use lazy_static;
+use rayon::prelude::*;
 #[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
 use mongodb::bson::doc;
 #[cfg(any(feature = "mongo-std-sync", feature = "mongo-tokio-sync"))]
@@ -288,6 +289,21 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
     /// This is intended for high-throughput `apply_txs_final` paths where only the final root is
     /// required. It deduplicates repeated leaf indices with "last write wins".
     pub fn update_leaves_batch(&mut self, updates: &Vec<(u64, [u8; 32])>) -> Result<(), MerkleError> {
+        self.update_leaves_batch_impl(updates, false)
+    }
+
+    pub fn update_leaves_batch_parallel(
+        &mut self,
+        updates: &Vec<(u64, [u8; 32])>,
+    ) -> Result<(), MerkleError> {
+        self.update_leaves_batch_impl(updates, true)
+    }
+
+    fn update_leaves_batch_impl(
+        &mut self,
+        updates: &Vec<(u64, [u8; 32])>,
+        parallel: bool,
+    ) -> Result<(), MerkleError> {
         if updates.is_empty() {
             return Ok(());
         }
@@ -363,44 +379,103 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
             });
         }
 
-        let mut indices: Vec<u64> = affected.into_iter().collect();
-        indices.sort_unstable_by(|a, b| b.cmp(a));
-
-        for index in indices {
-            let height = (index + 1).ilog2() as usize;
-            if height >= DEPTH {
-                continue;
+        if parallel {
+            let root_hash = self.get_root_hash();
+            let mut by_height: Vec<Vec<u64>> = vec![Vec::new(); DEPTH];
+            for index in old_children.keys() {
+                let height = (*index + 1).ilog2() as usize;
+                if height < DEPTH {
+                    by_height[height].push(*index);
+                }
             }
 
-            let left_index = index
-                .checked_mul(2)
-                .and_then(|v| v.checked_add(1))
-                .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
-            let right_index = left_index
-                .checked_add(1)
-                .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
+            for height in (0..DEPTH).rev() {
+                let level = &by_height[height];
+                if level.is_empty() {
+                    continue;
+                }
 
-            let (old_left, old_right) = old_children.get(&index).ok_or_else(|| {
-                MerkleError::new(self.get_root_hash(), index, MerkleErrorCode::RecordNotFound)
-            })?;
+                let default_hash = self.get_default_hash(height)?;
+                let old_children_ref = &old_children;
+                let new_hashes_ref = &new_hashes;
+                let computed: Result<Vec<(u64, [u8; 32], [u8; 32], [u8; 32])>, MerkleError> = level
+                    .par_iter()
+                    .map(|&index| {
+                        let left_index = index
+                            .checked_mul(2)
+                            .and_then(|v| v.checked_add(1))
+                            .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
+                        let right_index = left_index
+                            .checked_add(1)
+                            .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
 
-            let left_hash = new_hashes.get(&left_index).copied().unwrap_or(*old_left);
-            let right_hash = new_hashes.get(&right_index).copied().unwrap_or(*old_right);
-            let parent_hash = Self::hash(&left_hash, &right_hash);
-            new_hashes.insert(index, parent_hash);
+                        let (old_left, old_right) = old_children_ref.get(&index).ok_or_else(|| {
+                            MerkleError::new(root_hash, index, MerkleErrorCode::RecordNotFound)
+                        })?;
 
-            let default_hash = self.get_default_hash(height)?;
-            if parent_hash == default_hash {
-                continue;
+                        let left_hash = new_hashes_ref.get(&left_index).copied().unwrap_or(*old_left);
+                        let right_hash = new_hashes_ref.get(&right_index).copied().unwrap_or(*old_right);
+                        let parent_hash = Self::hash(&left_hash, &right_hash);
+                        Ok((index, parent_hash, left_hash, right_hash))
+                    })
+                    .collect();
+
+                for (index, parent_hash, left_hash, right_hash) in computed? {
+                    new_hashes.insert(index, parent_hash);
+
+                    if parent_hash == default_hash {
+                        continue;
+                    }
+
+                    records.push(MerkleRecord {
+                        index,
+                        hash: parent_hash,
+                        left: Some(left_hash),
+                        right: Some(right_hash),
+                        data: None,
+                    });
+                }
             }
+        } else {
+            let mut indices: Vec<u64> = affected.into_iter().collect();
+            indices.sort_unstable_by(|a, b| b.cmp(a));
 
-            records.push(MerkleRecord {
-                index,
-                hash: parent_hash,
-                left: Some(left_hash),
-                right: Some(right_hash),
-                data: None,
-            });
+            for index in indices {
+                let height = (index + 1).ilog2() as usize;
+                if height >= DEPTH {
+                    continue;
+                }
+
+                let left_index = index
+                    .checked_mul(2)
+                    .and_then(|v| v.checked_add(1))
+                    .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
+                let right_index = left_index
+                    .checked_add(1)
+                    .ok_or_else(|| MerkleError::new([0; 32], index, MerkleErrorCode::InvalidIndex))?;
+
+                let (old_left, old_right) = old_children.get(&index).ok_or_else(|| {
+                    MerkleError::new(self.get_root_hash(), index, MerkleErrorCode::RecordNotFound)
+                })?;
+
+                let left_hash = new_hashes.get(&left_index).copied().unwrap_or(*old_left);
+                let right_hash = new_hashes.get(&right_index).copied().unwrap_or(*old_right);
+                let parent_hash = Self::hash(&left_hash, &right_hash);
+                new_hashes.insert(index, parent_hash);
+
+                let default_hash = self.get_default_hash(height)?;
+                if parent_hash == default_hash {
+                    continue;
+                }
+
+                records.push(MerkleRecord {
+                    index,
+                    hash: parent_hash,
+                    left: Some(left_hash),
+                    right: Some(right_hash),
+                    data: None,
+                });
+            }
         }
 
         let new_root = new_hashes
