@@ -1,6 +1,7 @@
 pub mod anemoi;
 pub mod babyjub;
 pub mod bits_arith;
+#[cfg(feature = "bls")]
 pub mod bls;
 pub mod bn256;
 pub mod host;

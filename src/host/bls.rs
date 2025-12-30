@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "bls"))]
 mod tests {
     use crate::host::{ExternalHostCallEntry, ExternalHostCallEntryTable, ForeignInst};
     use crate::proof::build_host_circuit;
