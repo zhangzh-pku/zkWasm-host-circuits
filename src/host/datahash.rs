@@ -185,4 +185,29 @@ impl DataHashRecord {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::DataHashRecord;
+
+    #[test]
+    fn datahash_round_trip_slice() {
+        let record = DataHashRecord {
+            hash: [7u8; 32],
+            data: vec![1, 2, 3, 4, 5],
+        };
+        let encoded = record.to_slice();
+        let decoded = DataHashRecord::from_slice(&encoded).expect("round trip");
+        assert_eq!(decoded.hash, record.hash);
+        assert_eq!(decoded.data, record.data);
+    }
+
+    #[test]
+    fn datahash_from_slice_rejects_short_input() {
+        let err = DataHashRecord::from_slice(&[1u8; 31]).unwrap_err();
+        assert!(err.to_string().contains("Slice too short for hash"));
+
+        let mut bytes = vec![0u8; 32];
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let err = DataHashRecord::from_slice(&bytes).unwrap_err();
+        assert!(err.to_string().contains("Slice too short for data content"));
+    }
+}

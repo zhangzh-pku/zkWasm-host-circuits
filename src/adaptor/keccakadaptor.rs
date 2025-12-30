@@ -221,6 +221,9 @@ impl HostOpSelector for KeccakChip<Fr> {
 mod tests {
     use crate::host::ForeignInst::{Keccak256Finalize, Keccak256New, Keccak256Push};
     use crate::host::{ExternalHostCallEntry, ExternalHostCallEntryTable};
+    use crate::proof::build_host_circuit;
+    use crate::circuits::keccak256::KeccakChip;
+    use halo2_proofs::dev::MockProver;
     use crate::utils::field_to_u64;
     use halo2_proofs::pairing::bn256::Fr;
     use std::fs::File;
@@ -388,5 +391,38 @@ mod tests {
         ]);
         let file = File::create("keccak256_test_multi_byte.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
+    }
+
+    #[test]
+    fn keccak_host_call_sequence_single_round() {
+        let table = hash_to_host_call_table(vec![[Fr::one(); 17]]);
+        let entries = &table.0;
+        assert_eq!(entries.len(), 22);
+        assert_eq!(entries[0].op, Keccak256New as usize);
+        assert_eq!(entries[0].value, 1);
+        assert!(entries[1..18]
+            .iter()
+            .all(|entry| entry.op == Keccak256Push as usize));
+        assert!(entries[18..]
+            .iter()
+            .all(|entry| entry.op == Keccak256Finalize as usize));
+    }
+
+    #[test]
+    fn keccak_host_call_sequence_restart_flag() {
+        let table = hash_to_host_call_table(vec![[Fr::one(); 17], [Fr::zero(); 17]]);
+        let entries = &table.0;
+        let round_len = 22;
+        assert_eq!(entries[0].value, 1);
+        assert_eq!(entries[round_len].op, Keccak256New as usize);
+        assert_eq!(entries[round_len].value, 0);
+    }
+
+    #[test]
+    fn keccak_host_circuit_accepts_single_round() {
+        let table = hash_to_host_call_table(vec![[Fr::one(); 17]]);
+        let circuit = build_host_circuit::<KeccakChip<Fr>>(&table, 22, ());
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
     }
 }

@@ -1,8 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::host::{ExternalHostCallEntry, ExternalHostCallEntryTable, ForeignInst};
+    use crate::proof::build_host_circuit;
+    use crate::circuits::bls::{Bls381PairChip, Bls381SumChip};
     use crate::utils::field_to_bn;
     use ff::Field;
+    use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bls12_381::pairing;
     use halo2_proofs::pairing::bls12_381::{
         Fq as Bls381Fq, Fr, G1Affine, G2Affine, Gt as Bls381Gt, G1, G2,
@@ -174,5 +177,40 @@ mod tests {
         let table = ExternalHostCallEntryTable(inputs);
         let file = File::create("blssumtest.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
+    }
+
+    #[test]
+    fn bls_pair_host_circuit_accepts_valid_pairing() {
+        let a: G1Affine = G1::generator().into();
+        let b: G2Affine = G2Affine::from(G2::generator());
+        let table = create_bls_pair_shared_table(a, b);
+        let circuit = build_host_circuit::<Bls381PairChip<halo2_proofs::pairing::bn256::Fr>>(
+            &table,
+            22,
+            (),
+        );
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn bls_sum_host_circuit_accepts_single_step() {
+        let g = G1::generator();
+        let a = Fr::from(5u64);
+        let sum = g * a;
+        let entries = create_bls_sum_input(
+            1,
+            a,
+            G1Affine::from(g),
+            G1Affine::from(sum),
+        );
+        let table = ExternalHostCallEntryTable(entries);
+        let circuit = build_host_circuit::<Bls381SumChip<halo2_proofs::pairing::bn256::Fr>>(
+            &table,
+            22,
+            (),
+        );
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
     }
 }

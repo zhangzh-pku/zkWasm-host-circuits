@@ -183,4 +183,14 @@ mod tests {
         assert_eq!(handle_a.join().unwrap(), expected_a);
         assert_eq!(handle_b.join().unwrap(), expected_b);
     }
+
+    #[test]
+    fn poseidon_hasher_clone_starts_fresh() {
+        let inputs = [Fr::from(42u64); 8];
+        let mut hasher_a = super::POSEIDON_HASHER.clone();
+        let mut hasher_b = super::POSEIDON_HASHER.clone();
+        let out_a = hasher_a.update_exact(&inputs).to_repr();
+        let out_b = hasher_b.update_exact(&inputs).to_repr();
+        assert_eq!(out_a, out_b);
+    }
 }

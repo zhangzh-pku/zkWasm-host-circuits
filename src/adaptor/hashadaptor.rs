@@ -238,6 +238,9 @@ impl HostOpSelector for PoseidonChip<Fr, 9, 8> {
 #[cfg(test)]
 mod tests {
     use crate::host::{ExternalHostCallEntry, ExternalHostCallEntryTable};
+    use crate::proof::build_host_circuit;
+    use crate::circuits::poseidon::PoseidonChip;
+    use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bn256::Fr;
     use std::fs::File;
 
@@ -300,5 +303,38 @@ mod tests {
         ]);
         let file = File::create("poseidontest_multi.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
+    }
+
+    #[test]
+    fn poseidon_host_call_sequence_single_round() {
+        let table = hash_to_host_call_table(vec![[Fr::one(); 8]]);
+        let entries = &table.0;
+        assert_eq!(entries.len(), 37);
+        assert_eq!(entries[0].op, PoseidonNew as usize);
+        assert_eq!(entries[0].value, 1);
+        assert!(entries[1..33]
+            .iter()
+            .all(|entry| entry.op == PoseidonPush as usize));
+        assert!(entries[33..]
+            .iter()
+            .all(|entry| entry.op == PoseidonFinalize as usize));
+    }
+
+    #[test]
+    fn poseidon_host_call_sequence_restart_flag() {
+        let table = hash_to_host_call_table(vec![[Fr::one(); 8], [Fr::zero(); 8]]);
+        let entries = &table.0;
+        let round_len = 37;
+        assert_eq!(entries[0].value, 1);
+        assert_eq!(entries[round_len].op, PoseidonNew as usize);
+        assert_eq!(entries[round_len].value, 0);
+    }
+
+    #[test]
+    fn poseidon_host_circuit_accepts_single_round() {
+        let table = hash_to_host_call_table(vec![[Fr::one(); 8]]);
+        let circuit = build_host_circuit::<PoseidonChip<Fr, 9, 8>>(&table, 22, ());
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
     }
 }

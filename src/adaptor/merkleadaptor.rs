@@ -355,6 +355,9 @@ mod tests {
     use crate::utils::bytes_to_field;
     use crate::utils::bytes_to_u64;
     use crate::utils::field_to_bytes;
+    use crate::proof::build_host_circuit;
+    use crate::circuits::merkle::MerkleChip;
+    use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bn256::Fr;
     use std::fs::File;
 
@@ -445,5 +448,22 @@ mod tests {
         let file = File::create("kvpair_test2.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &ExternalHostCallEntryTable(default_table))
             .expect("can not write to file");
+    }
+
+    #[test]
+    fn merkle_host_circuit_accepts_get_set_sequence() {
+        let root_default = Fr::from_raw(bytes_to_u64(&DEFAULT_HASH_VEC[MERKLE_DEPTH]));
+        let index = 0;
+        let data = Fr::from(0x1000 as u64);
+        let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&vec![(
+            index,
+            root_default,
+            root_default,
+            [data, Fr::zero()],
+            MerkleGet,
+        )]));
+        let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, None);
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
     }
 }

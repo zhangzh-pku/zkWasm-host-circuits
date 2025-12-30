@@ -230,4 +230,17 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn parse_collection_id_rejects_invalid_length() {
+        let err = parse_collection_id("01").unwrap_err();
+        assert!(err.to_string().contains("Collection ID must be 32 bytes"));
+    }
+
+    #[test]
+    fn parse_collection_id_rejects_invalid_hex() {
+        let bad = "zz".repeat(32);
+        let err = parse_collection_id(&bad).unwrap_err();
+        assert!(err.to_string().contains("Failed to parse collection ID"));
+    }
 }

@@ -218,8 +218,11 @@ impl HostOpSelector for AltJubChip<Fr> {
 #[cfg(test)]
 mod tests {
     use super::msm_to_host_call_table;
+    use crate::circuits::babyjub::AltJubChip;
     use crate::host::jubjub::Point;
     use crate::host::ExternalHostCallEntryTable;
+    use crate::proof::build_host_circuit;
+    use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bn256::Fr;
     use std::fs::File;
 
@@ -237,5 +240,14 @@ mod tests {
         let file = File::create("jubjub_multi.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &ExternalHostCallEntryTable(default_table))
             .expect("can not write to file");
+    }
+
+    #[test]
+    fn jubjub_msm_host_circuit_accepts_single_step() {
+        let entries = msm_to_host_call_table(&vec![(Point::identity(), Fr::one())]);
+        let table = ExternalHostCallEntryTable(entries);
+        let circuit = build_host_circuit::<AltJubChip<Fr>>(&table, 22, ());
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
     }
 }

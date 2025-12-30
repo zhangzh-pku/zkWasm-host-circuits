@@ -700,6 +700,102 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
 }
 
 #[cfg(test)]
+mod error_tests {
+    use super::{MongoMerkle, DEFAULT_HASH_VEC};
+    use crate::host::datahash::DataHashRecord;
+    use crate::host::db::{RocksDB, TreeDB};
+    use crate::host::merkle::{MerkleErrorCode, MerkleTree};
+    use crate::host::mongomerkle::MerkleRecord;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use tempfile::tempdir;
+
+    struct FailingDb;
+
+    impl TreeDB for FailingDb {
+        fn get_merkle_record(
+            &self,
+            _hash: &[u8; 32],
+        ) -> Result<Option<MerkleRecord>, anyhow::Error> {
+            Err(anyhow::anyhow!("forced failure"))
+        }
+
+        fn set_merkle_record(&mut self, _record: MerkleRecord) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        fn set_merkle_records(&mut self, _records: &Vec<MerkleRecord>) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        fn get_data_record(
+            &self,
+            _hash: &[u8; 32],
+        ) -> Result<Option<DataHashRecord>, anyhow::Error> {
+            Ok(None)
+        }
+
+        fn set_data_record(&mut self, _record: DataHashRecord) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        fn set_data_records(&mut self, _records: &Vec<DataHashRecord>) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        fn start_record(&mut self, _record_db: RocksDB) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("recording not supported"))
+        }
+
+        fn stop_record(&mut self) -> anyhow::Result<RocksDB> {
+            Err(anyhow::anyhow!("recording not supported"))
+        }
+
+        fn is_recording(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn check_generate_default_node_rejects_invalid_hash() {
+        const DEPTH: usize = 6;
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mt = MongoMerkle::<DEPTH>::construct([0; 32], DEFAULT_HASH_VEC[DEPTH], Some(db));
+        let node = mt.generate_default_node(0).unwrap();
+        let mut bad_hash = node.hash;
+        bad_hash[0] ^= 1;
+        let err = mt.check_generate_default_node(0, &bad_hash).unwrap_err();
+        assert!(err.to_string().contains("InvalidHash"));
+    }
+
+    #[test]
+    fn get_node_with_hash_missing_record_returns_record_not_found() {
+        const DEPTH: usize = 6;
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mt = MongoMerkle::<DEPTH>::construct([0; 32], DEFAULT_HASH_VEC[DEPTH], Some(db));
+        let node = mt.generate_default_node(0).unwrap();
+        let mut bad_hash = node.hash;
+        bad_hash[0] ^= 1;
+        let err = mt.get_node_with_hash(0, &bad_hash).unwrap_err();
+        assert!(err.to_string().contains("RecordNotFound"));
+    }
+
+    #[test]
+    fn get_node_with_hash_db_error_maps_to_unexpected() {
+        const DEPTH: usize = 6;
+        let db = Rc::new(RefCell::new(FailingDb));
+        let mt = MongoMerkle::<DEPTH>::construct([0; 32], DEFAULT_HASH_VEC[DEPTH], Some(db));
+        let node = mt.generate_default_node(0).unwrap();
+        let mut bad_hash = node.hash;
+        bad_hash[0] ^= 1;
+        let err = mt.get_node_with_hash(0, &bad_hash).unwrap_err();
+        assert!(err.to_string().contains("UnexpectedDBError"));
+    }
+}
+
+#[cfg(all(test, any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
 mod tests {
     use super::{MerkleRecord, MongoMerkle, DEFAULT_HASH_VEC, RocksMerkle};
     use crate::host::cache::MERKLE_CACHE;

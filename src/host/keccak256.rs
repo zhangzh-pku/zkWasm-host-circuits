@@ -227,6 +227,27 @@ mod tests {
     use rand::RngCore;
     use rand_core::OsRng;
 
+    fn lanes_to_bytes_le(lanes: &[u64; 4]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32);
+        for lane in lanes.iter() {
+            out.extend_from_slice(&lane.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn keccak256_empty_matches_reference_vector() {
+        let mut hasher = super::KECCAK_HASHER.clone();
+        hasher.update(&[]);
+        let result = hasher.squeeze();
+        let bytes = lanes_to_bytes_le(&result);
+        let expected = hex::decode(
+            "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        )
+        .expect("valid hex");
+        assert_eq!(bytes, expected);
+    }
+
     #[test]
     fn test_keccak() {
         let exp = [

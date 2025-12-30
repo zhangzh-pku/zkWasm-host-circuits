@@ -302,4 +302,25 @@ mod tests {
         // assert_eq!(lhs,rhs)
         assert_eq!(Point::identity(), rst);
     }
+
+    #[test]
+    fn jubjub_identity_addition() {
+        let p = Point {
+            x: Fr::from(5u64),
+            y: Fr::from(7u64),
+        };
+        let id = Point::identity();
+        assert_eq!(p.add(&id), p);
+        assert_eq!(id.add(&p), p);
+    }
+
+    #[test]
+    fn jubjub_mul_scalar_zero_returns_identity() {
+        let p = Point {
+            x: Fr::from(3u64),
+            y: Fr::from(9u64),
+        };
+        let zero = BigUint::from(0u64);
+        assert_eq!(p.mul_scalar(&zero), Point::identity());
+    }
 }

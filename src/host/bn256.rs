@@ -1,8 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::host::{ExternalHostCallEntry, ExternalHostCallEntryTable, ForeignInst};
+    use crate::proof::build_host_circuit;
+    use crate::circuits::bn256::{Bn256PairChip, Bn256SumChip};
     use crate::utils::field_to_bn;
     use ff::Field;
+    use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bn256::pairing;
     use halo2_proofs::pairing::bn256::Fr;
     use halo2_proofs::pairing::bn256::{Fq as Bn256Fq, G1Affine, G2Affine, Gt as Bn256Gt, G1, G2};
@@ -166,5 +169,27 @@ mod tests {
         let table = ExternalHostCallEntryTable(inputs);
         let file = File::create("bn256sumtest.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
+    }
+
+    #[test]
+    fn bn256_pair_host_circuit_accepts_valid_pairing() {
+        let a = G1::generator();
+        let b = G2::generator();
+        let table = create_bn256_pair_shared_table(a, b);
+        let circuit = build_host_circuit::<Bn256PairChip<Fr>>(&table, 22, ());
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn bn256_sum_host_circuit_accepts_single_step() {
+        let g = G1::generator();
+        let a = Fr::from(7u64);
+        let sum = g * a;
+        let entries = create_bn256_sum_input(1, a, g, sum);
+        let table = ExternalHostCallEntryTable(entries);
+        let circuit = build_host_circuit::<Bn256SumChip<Fr>>(&table, 22, ());
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
     }
 }

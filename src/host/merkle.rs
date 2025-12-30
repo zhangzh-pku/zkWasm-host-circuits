@@ -262,7 +262,7 @@ pub trait MerkleTree<H: Debug + Clone + PartialEq, const D: usize> {
 #[cfg(test)]
 mod tests {
     use crate::host::db::TreeDB;
-    use crate::host::merkle::{MerkleError, MerkleNode, MerkleTree};
+    use crate::host::merkle::{MerkleError, MerkleErrorCode, MerkleNode, MerkleTree};
     use std::cell::RefCell;
     use std::rc::Rc;
     struct MerkleAsArray {
@@ -445,5 +445,34 @@ mod tests {
         let root = mt.get_root_hash();
         mt.debug();
         assert_eq!(root, 6 as u64);
+    }
+
+    #[test]
+    fn test_get_path_rejects_invalid_leaf_indices() {
+        let mt = MerkleAsArray::construct("addr".to_string(), "root".to_string(), None);
+        let err = mt.get_path(0).unwrap_err();
+        assert!(err.to_string().contains("InvalidLeafIndex"));
+
+        let err = mt.get_path(2_u64.pow(7)).unwrap_err();
+        assert!(err.to_string().contains("InvalidLeafIndex"));
+    }
+
+    #[test]
+    fn test_boundary_check_rejects_out_of_range_index() {
+        let mt = MerkleAsArray::construct("addr".to_string(), "root".to_string(), None);
+        let err = mt.boundary_check(127).unwrap_err();
+        assert!(err.to_string().contains("InvalidIndex"));
+    }
+
+    #[test]
+    fn test_verify_proof_detects_tampering() {
+        let mut mt = MerkleAsArray::construct("test".to_string(), "test".to_string(), None);
+        let (mut leaf, _) = mt.get_leaf_with_proof(2_u64.pow(6) - 1).unwrap();
+        leaf.value = 5;
+        let mut proof = mt.set_leaf_with_proof(&leaf).unwrap();
+        assert!(mt.verify_proof(&proof).unwrap());
+
+        proof.assist[0] = proof.assist[0].wrapping_add(1);
+        assert!(!mt.verify_proof(&proof).unwrap());
     }
 }

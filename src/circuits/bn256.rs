@@ -336,3 +336,127 @@ impl Bn256SumChip<Fr> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Bn256ChipConfig, Bn256PairChip};
+    use crate::utils::Limb;
+    use ff::PrimeField;
+    use halo2_proofs::arithmetic::FieldExt;
+    use halo2_proofs::circuit::floor_planner::FlatFloorPlanner;
+    use halo2_proofs::dev::MockProver;
+    use halo2_proofs::pairing::bn256::{pairing, Fq, Fq12, G1Affine, G2Affine, G1, G2};
+    use halo2_proofs::{
+        circuit::Layouter,
+        plonk::{Circuit, ConstraintSystem, Error},
+    };
+    use num_bigint::BigUint;
+    use num_traits::ToPrimitive;
+
+    fn fq_to_biguint<F: PrimeField>(fq: &F) -> BigUint {
+        BigUint::from_bytes_le(fq.to_repr().as_ref())
+    }
+
+    fn split_u108(mut value: BigUint, limbs: usize) -> Vec<halo2_proofs::pairing::bn256::Fr> {
+        let base: BigUint = BigUint::from(1u128) << 108;
+        let mut out = Vec::with_capacity(limbs);
+        for _ in 0..limbs {
+            let limb = &value % &base;
+            let limb_u128 = limb.to_u128().unwrap();
+            out.push(halo2_proofs::pairing::bn256::Fr::from_u128(limb_u128));
+            value /= &base;
+        }
+        out
+    }
+
+    fn fq_to_limbs(fq: &Fq) -> Vec<halo2_proofs::pairing::bn256::Fr> {
+        split_u108(fq_to_biguint(fq), 3)
+    }
+
+    fn g1_to_limbs(p: &G1Affine) -> Vec<Limb<halo2_proofs::pairing::bn256::Fr>> {
+        let mut out = Vec::new();
+        out.extend(fq_to_limbs(&p.x).into_iter().map(|v| Limb::new(None, v)));
+        out.extend(fq_to_limbs(&p.y).into_iter().map(|v| Limb::new(None, v)));
+        out.push(Limb::new(None, halo2_proofs::pairing::bn256::Fr::zero()));
+        out
+    }
+
+    fn g2_to_limbs(p: &G2Affine) -> Vec<Limb<halo2_proofs::pairing::bn256::Fr>> {
+        let mut out = Vec::new();
+        out.extend(fq_to_limbs(&p.x.c0).into_iter().map(|v| Limb::new(None, v)));
+        out.extend(fq_to_limbs(&p.x.c1).into_iter().map(|v| Limb::new(None, v)));
+        out.extend(fq_to_limbs(&p.y.c0).into_iter().map(|v| Limb::new(None, v)));
+        out.extend(fq_to_limbs(&p.y.c1).into_iter().map(|v| Limb::new(None, v)));
+        out.push(Limb::new(None, halo2_proofs::pairing::bn256::Fr::zero()));
+        out
+    }
+
+    fn fq12_to_limbs(fq12: &Fq12) -> Vec<Limb<halo2_proofs::pairing::bn256::Fr>> {
+        let coeffs = [
+            fq12.c0.c0.c0,
+            fq12.c0.c0.c1,
+            fq12.c0.c1.c0,
+            fq12.c0.c1.c1,
+            fq12.c0.c2.c0,
+            fq12.c0.c2.c1,
+            fq12.c1.c0.c0,
+            fq12.c1.c0.c1,
+            fq12.c1.c1.c0,
+            fq12.c1.c1.c1,
+            fq12.c1.c2.c0,
+            fq12.c1.c2.c1,
+        ];
+        let mut out = Vec::new();
+        for coeff in coeffs.iter() {
+            out.extend(fq_to_limbs(coeff).into_iter().map(|v| Limb::new(None, v)));
+        }
+        out
+    }
+
+    #[derive(Clone, Debug)]
+    struct PairCircuit {
+        a: Vec<Limb<halo2_proofs::pairing::bn256::Fr>>,
+        b: Vec<Limb<halo2_proofs::pairing::bn256::Fr>>,
+        ab: Vec<Limb<halo2_proofs::pairing::bn256::Fr>>,
+    }
+
+    impl Circuit<halo2_proofs::pairing::bn256::Fr> for PairCircuit {
+        type Config = Bn256ChipConfig;
+        type FloorPlanner = FlatFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self {
+                a: vec![],
+                b: vec![],
+                ab: vec![],
+            }
+        }
+
+        fn configure(meta: &mut ConstraintSystem<halo2_proofs::pairing::bn256::Fr>) -> Self::Config {
+            Bn256PairChip::<halo2_proofs::pairing::bn256::Fr>::configure(meta)
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<halo2_proofs::pairing::bn256::Fr>,
+        ) -> Result<(), Error> {
+            let chip = Bn256PairChip::construct(config);
+            chip.load_bn256_pair_circuit(&self.a, &self.b, &self.ab, &mut layouter)
+        }
+    }
+
+    #[test]
+    fn test_bn256_pairing_constraints() {
+        let g1 = G1Affine::from(G1::generator());
+        let g2 = G2Affine::from(G2::generator());
+        let gt = pairing(&g1, &g2);
+        let circuit = PairCircuit {
+            a: g1_to_limbs(&g1),
+            b: g2_to_limbs(&g2),
+            ab: fq12_to_limbs(&gt.0),
+        };
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+}

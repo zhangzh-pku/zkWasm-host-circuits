@@ -143,3 +143,175 @@ impl<F: FieldExt> BitsArithChip<F> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BitsArithChip, BitsArithConfig, BIT_AND, BIT_XOR};
+    use crate::circuits::LookupAssistConfig;
+    use crate::value_for_assign;
+    use halo2_proofs::circuit::floor_planner::FlatFloorPlanner;
+    use halo2_proofs::dev::MockProver;
+    use halo2_proofs::pairing::bn256::Fr;
+    use halo2_proofs::{
+        circuit::{Chip, Layouter, Region},
+        plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Expression, VirtualCells},
+        poly::Rotation,
+    };
+
+    #[derive(Clone, Debug)]
+    struct HelperChipConfig {
+        cols: [Column<Advice>; 13],
+    }
+
+    impl HelperChipConfig {
+        fn lookup_cols(&self, cs: &mut VirtualCells<Fr>) -> Vec<Expression<Fr>> {
+            self.cols
+                .iter()
+                .map(|col| cs.query_advice(*col, Rotation::cur()))
+                .collect()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct HelperChip {
+        config: HelperChipConfig,
+    }
+
+    impl Chip<Fr> for HelperChip {
+        type Config = HelperChipConfig;
+        type Loaded = ();
+
+        fn config(&self) -> &Self::Config {
+            &self.config
+        }
+
+        fn loaded(&self) -> &Self::Loaded {
+            &()
+        }
+    }
+
+    impl HelperChip {
+        fn new(config: HelperChipConfig) -> Self {
+            HelperChip { config }
+        }
+
+        fn configure(cs: &mut ConstraintSystem<Fr>) -> HelperChipConfig {
+            let cols = [0; 13].map(|_| cs.advice_column());
+            cols.map(|c| cs.enable_equality(c));
+            HelperChipConfig { cols }
+        }
+
+        fn assign_row(
+            &self,
+            region: &Region<Fr>,
+            offset: usize,
+            values: [Fr; 13],
+        ) -> Result<(), Error> {
+            for (idx, value) in values.iter().enumerate() {
+                region.assign_advice(
+                    || "bits arith input",
+                    self.config.cols[idx],
+                    offset,
+                    || value_for_assign!(*value),
+                )?;
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestCircuit {
+        lhs: [u8; 4],
+        rhs: [u8; 4],
+        op: u8,
+        res: [u8; 4],
+    }
+
+    impl Circuit<Fr> for TestCircuit {
+        type Config = (BitsArithConfig, HelperChipConfig);
+        type FloorPlanner = FlatFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self {
+                lhs: [0; 4],
+                rhs: [0; 4],
+                op: BIT_XOR,
+                res: [0; 4],
+            }
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+            let bits_config = BitsArithChip::<Fr>::configure(meta);
+            let helper_config = HelperChip::configure(meta);
+            bits_config.register(meta, |c| helper_config.lookup_cols(c));
+            (bits_config, helper_config)
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fr>,
+        ) -> Result<(), Error> {
+            let helper = HelperChip::new(config.1);
+            layouter.assign_region(
+                || "bits arith test",
+                |region| {
+                    let mut offset = 0;
+                    let mut bits_chip = BitsArithChip::<Fr>::new(config.0.clone());
+                    bits_chip.initialize(&region, &mut offset)?;
+
+                    let mut values = [Fr::zero(); 13];
+                    for i in 0..4 {
+                        values[i] = Fr::from(self.lhs[i] as u64);
+                        values[i + 4] = Fr::from(self.rhs[i] as u64);
+                        values[i + 8] = Fr::from(self.res[i] as u64);
+                    }
+                    values[12] = Fr::from(self.op as u64);
+                    helper.assign_row(&region, 0, values)?;
+                    Ok(())
+                },
+            )?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_bits_arith_xor() {
+        let lhs = [0x0f, 0x12, 0x55, 0xaa];
+        let rhs = [0xf0, 0x34, 0xaa, 0x0f];
+        let res = [
+            lhs[0] ^ rhs[0],
+            lhs[1] ^ rhs[1],
+            lhs[2] ^ rhs[2],
+            lhs[3] ^ rhs[3],
+        ];
+        let circuit = TestCircuit {
+            lhs,
+            rhs,
+            op: BIT_XOR,
+            res,
+        };
+        let prover = MockProver::run(18, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn test_bits_arith_and() {
+        let lhs = [0xf0, 0x3c, 0x55, 0xaa];
+        let rhs = [0x0f, 0x0f, 0xaa, 0x0f];
+        let res = [
+            lhs[0] & rhs[0],
+            lhs[1] & rhs[1],
+            lhs[2] & rhs[2],
+            lhs[3] & rhs[3],
+        ];
+        let circuit = TestCircuit {
+            lhs,
+            rhs,
+            op: BIT_AND,
+            res,
+        };
+        let prover = MockProver::run(18, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+}
