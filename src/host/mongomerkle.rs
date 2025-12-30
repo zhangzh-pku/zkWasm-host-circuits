@@ -704,7 +704,7 @@ mod error_tests {
     use super::{MongoMerkle, DEFAULT_HASH_VEC};
     use crate::host::datahash::DataHashRecord;
     use crate::host::db::{RocksDB, TreeDB};
-    use crate::host::merkle::{MerkleErrorCode, MerkleTree};
+    use crate::host::merkle::MerkleTree;
     use crate::host::mongomerkle::MerkleRecord;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -736,10 +736,6 @@ mod error_tests {
         }
 
         fn set_data_record(&mut self, _record: DataHashRecord) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-
-        fn set_data_records(&mut self, _records: &Vec<DataHashRecord>) -> Result<(), anyhow::Error> {
             Ok(())
         }
 
