@@ -1,3 +1,17 @@
 target/
 .idea/
 test_db
+# Test-generated fixtures in repo root.
+blspairtest.json
+blssumtest.json
+bn256pairtest.json
+bn256sumtest.json
+jubjub.json
+jubjub_multi.json
+keccak256_test.json
+keccak256_test_multi.json
+keccak256_test_multi_byte.json
+kvpair_test1.json
+kvpair_test2.json
+poseidontest.json
+poseidontest_multi.json
