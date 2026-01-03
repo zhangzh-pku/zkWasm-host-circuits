@@ -341,17 +341,20 @@ impl Bn256SumChip<Fr> {
 mod tests {
     use super::{Bn256ChipConfig, Bn256PairChip};
     use crate::utils::Limb;
+    use crate::value_for_assign;
     use ff::PrimeField;
     use halo2_proofs::arithmetic::FieldExt;
     use halo2_proofs::circuit::floor_planner::FlatFloorPlanner;
     use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bn256::{pairing, Fq, Fq12, G1Affine, G2Affine, G1, G2};
+    use halo2_proofs::pairing::group::Group;
     use halo2_proofs::{
         circuit::Layouter,
-        plonk::{Circuit, ConstraintSystem, Error},
+        plonk::{Advice, Circuit, Column, ConstraintSystem, Error},
     };
     use num_bigint::BigUint;
     use num_traits::ToPrimitive;
+    use rand::rngs::OsRng;
 
     fn fq_to_biguint<F: PrimeField>(fq: &F) -> BigUint {
         BigUint::from_bytes_le(fq.to_repr().as_ref())
@@ -421,19 +424,23 @@ mod tests {
     }
 
     impl Circuit<halo2_proofs::pairing::bn256::Fr> for PairCircuit {
-        type Config = Bn256ChipConfig;
+        type Config = (Bn256ChipConfig, Column<Advice>);
         type FloorPlanner = FlatFloorPlanner;
 
         fn without_witnesses(&self) -> Self {
+            let zero = Limb::new(None, halo2_proofs::pairing::bn256::Fr::zero());
             Self {
-                a: vec![],
-                b: vec![],
-                ab: vec![],
+                a: vec![zero.clone(); self.a.len()],
+                b: vec![zero.clone(); self.b.len()],
+                ab: vec![zero; self.ab.len()],
             }
         }
 
         fn configure(meta: &mut ConstraintSystem<halo2_proofs::pairing::bn256::Fr>) -> Self::Config {
-            Bn256PairChip::<halo2_proofs::pairing::bn256::Fr>::configure(meta)
+            let chip_config = Bn256PairChip::<halo2_proofs::pairing::bn256::Fr>::configure(meta);
+            let input = meta.advice_column();
+            meta.enable_equality(input);
+            (chip_config, input)
         }
 
         fn synthesize(
@@ -441,8 +448,50 @@ mod tests {
             config: Self::Config,
             mut layouter: impl Layouter<halo2_proofs::pairing::bn256::Fr>,
         ) -> Result<(), Error> {
-            let chip = Bn256PairChip::construct(config);
-            chip.load_bn256_pair_circuit(&self.a, &self.b, &self.ab, &mut layouter)
+            let (chip_config, input) = config;
+            let (assigned_a, assigned_b, assigned_ab) = layouter.assign_region(
+                || "bn256 inputs",
+                |mut region| {
+                    let mut offset = 0;
+                    let mut assigned_a = Vec::with_capacity(self.a.len());
+                    let mut assigned_b = Vec::with_capacity(self.b.len());
+                    let mut assigned_ab = Vec::with_capacity(self.ab.len());
+                    for limb in &self.a {
+                        let cell = region.assign_advice(
+                            || "a limb",
+                            input,
+                            offset,
+                            || value_for_assign!(limb.value),
+                        )?;
+                        assigned_a.push(Limb::new(Some(cell), limb.value));
+                        offset += 1;
+                    }
+                    for limb in &self.b {
+                        let cell = region.assign_advice(
+                            || "b limb",
+                            input,
+                            offset,
+                            || value_for_assign!(limb.value),
+                        )?;
+                        assigned_b.push(Limb::new(Some(cell), limb.value));
+                        offset += 1;
+                    }
+                    for limb in &self.ab {
+                        let cell = region.assign_advice(
+                            || "ab limb",
+                            input,
+                            offset,
+                            || value_for_assign!(limb.value),
+                        )?;
+                        assigned_ab.push(Limb::new(Some(cell), limb.value));
+                        offset += 1;
+                    }
+                    Ok((assigned_a, assigned_b, assigned_ab))
+                },
+            )?;
+
+            let chip = Bn256PairChip::construct(chip_config);
+            chip.load_bn256_pair_circuit(&assigned_a, &assigned_b, &assigned_ab, &mut layouter)
         }
     }
 
@@ -450,6 +499,36 @@ mod tests {
     fn test_bn256_pairing_constraints() {
         let g1 = G1Affine::from(G1::generator());
         let g2 = G2Affine::from(G2::generator());
+        let gt = pairing(&g1, &g2);
+        let circuit = PairCircuit {
+            a: g1_to_limbs(&g1),
+            b: g2_to_limbs(&g2),
+            ab: fq12_to_limbs(&gt.0),
+        };
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    #[ignore = "halo2ecc rejects identity points"]
+    fn test_bn256_pairing_constraints_identity_g1() {
+        let g1 = G1Affine::from(G1::identity());
+        let g2 = G2Affine::from(G2::generator());
+        let gt = pairing(&g1, &g2);
+        let circuit = PairCircuit {
+            a: g1_to_limbs(&g1),
+            b: g2_to_limbs(&g2),
+            ab: fq12_to_limbs(&gt.0),
+        };
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn test_bn256_pairing_constraints_random_points() {
+        let mut rng = OsRng;
+        let g1 = G1Affine::from(G1::random(&mut rng));
+        let g2 = G2Affine::from(G2::random(&mut rng));
         let gt = pairing(&g1, &g2);
         let circuit = PairCircuit {
             a: g1_to_limbs(&g1),

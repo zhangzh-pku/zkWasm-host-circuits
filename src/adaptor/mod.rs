@@ -73,3 +73,48 @@ pub fn get_selected_entries<Fr: FieldExt>(
         .zip(shared_index)
         .collect::<Vec<((Fr, Fr), Fr)>>()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::get_selected_entries;
+    use crate::utils::field_to_u64;
+    use halo2_proofs::pairing::bn256::Fr;
+
+    #[test]
+    fn filter_single_opcode_assigns_descending_indices() {
+        let shared_operands = vec![
+            Fr::from(10u64),
+            Fr::from(11u64),
+            Fr::from(12u64),
+            Fr::from(13u64),
+        ];
+        let shared_opcodes = vec![
+            Fr::from(1u64),
+            Fr::from(2u64),
+            Fr::from(3u64),
+            Fr::from(2u64),
+        ];
+        let opcodes = vec![Fr::from(2u64)];
+        let selected = get_selected_entries(&shared_operands, &shared_opcodes, &opcodes);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].0 .0, Fr::from(11u64));
+        assert_eq!(selected[0].0 .1, Fr::from(2u64));
+        assert_eq!(field_to_u64(&selected[0].1), 2);
+        assert_eq!(field_to_u64(&selected[1].1), 1);
+    }
+
+    #[test]
+    fn filter_mixed_opcodes_preserves_order() {
+        let shared_operands = vec![Fr::from(21u64), Fr::from(22u64), Fr::from(23u64)];
+        let shared_opcodes = vec![Fr::from(5u64), Fr::from(7u64), Fr::from(5u64)];
+        let opcodes = vec![Fr::from(5u64), Fr::from(7u64)];
+        let selected = get_selected_entries(&shared_operands, &shared_opcodes, &opcodes);
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].0 .0, Fr::from(21u64));
+        assert_eq!(selected[1].0 .0, Fr::from(22u64));
+        assert_eq!(selected[2].0 .0, Fr::from(23u64));
+        assert_eq!(field_to_u64(&selected[0].1), 3);
+        assert_eq!(field_to_u64(&selected[1].1), 2);
+        assert_eq!(field_to_u64(&selected[2].1), 1);
+    }
+}

@@ -280,6 +280,43 @@ mod tests {
             Fr::zero(),
             Fr::from(1u64 << 63),
         ]]);
+        let entries = &table.0;
+        assert_eq!(entries.len(), 22);
+        assert_eq!(entries[0].op, Keccak256New as usize);
+        assert_eq!(entries[0].value, 1);
+        assert!(entries[1..18]
+            .iter()
+            .all(|entry| entry.op == Keccak256Push as usize));
+        assert!(entries[18..]
+            .iter()
+            .all(|entry| entry.op == Keccak256Finalize as usize));
+        let lanes = [
+            1u64,
+            1u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            1u64 << 63,
+        ];
+        for (entry, lane) in entries[1..18].iter().zip(lanes.iter()) {
+            assert_eq!(entry.value, *lane);
+        }
+        let mut hasher = crate::host::keccak256::KECCAK_HASHER.clone();
+        let expected = hasher.update_exact(&lanes);
+        for (entry, expected_lane) in entries[18..].iter().zip(expected.iter()) {
+            assert_eq!(entry.value, *expected_lane);
+        }
         let file = File::create("keccak256_test.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
     }
@@ -308,6 +345,54 @@ mod tests {
                 Fr::from(1u64 << 63),
             ],
         ]);
+        let entries = &table.0;
+        let round_len = 22usize;
+        assert_eq!(entries.len(), round_len * 2);
+        let mut hasher = crate::host::keccak256::KECCAK_HASHER.clone();
+        let round_inputs = [
+            [1u64; 17],
+            [
+                1u64,
+                1u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                0u64,
+                1u64 << 63,
+            ],
+        ];
+        for (round_idx, lanes) in round_inputs.iter().enumerate() {
+            let base = round_idx * round_len;
+            let expected_new = if round_idx == 0 { 1u64 } else { 0u64 };
+            assert_eq!(entries[base].op, Keccak256New as usize);
+            assert_eq!(entries[base].value, expected_new);
+            assert!(entries[base + 1..base + 18]
+                .iter()
+                .all(|entry| entry.op == Keccak256Push as usize));
+            assert!(entries[base + 18..base + 22]
+                .iter()
+                .all(|entry| entry.op == Keccak256Finalize as usize));
+            for (entry, lane) in entries[base + 1..base + 18].iter().zip(lanes.iter()) {
+                assert_eq!(entry.value, *lane);
+            }
+            let expected = hasher.update_exact(lanes);
+            for (entry, expected_lane) in entries[base + 18..base + 22]
+                .iter()
+                .zip(expected.iter())
+            {
+                assert_eq!(entry.value, *expected_lane);
+            }
+        }
         let file = File::create("keccak256_test_multi.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
     }
@@ -389,6 +474,20 @@ mod tests {
                 Fr::from(1u64 << 63),
             ],
         ]);
+        let entries = &table.0;
+        let round_len = 22usize;
+        assert_eq!(entries.len() % round_len, 0);
+        for (round_idx, chunk) in entries.chunks(round_len).enumerate() {
+            let expected_new = if round_idx == 0 { 1u64 } else { 0u64 };
+            assert_eq!(chunk[0].op, Keccak256New as usize);
+            assert_eq!(chunk[0].value, expected_new);
+            assert!(chunk[1..18]
+                .iter()
+                .all(|entry| entry.op == Keccak256Push as usize));
+            assert!(chunk[18..]
+                .iter()
+                .all(|entry| entry.op == Keccak256Finalize as usize));
+        }
         let file = File::create("keccak256_test_multi_byte.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
     }
@@ -424,5 +523,16 @@ mod tests {
         let circuit = build_host_circuit::<KeccakChip<Fr>>(&table, 22, ());
         let prover = MockProver::run(22, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    #[should_panic]
+    fn keccak_host_circuit_rejects_wrong_digest() {
+        let mut table = hash_to_host_call_table(vec![[Fr::one(); 17]]);
+        if let Some(entry) = table.0.last_mut() {
+            entry.value = entry.value.wrapping_add(1);
+        }
+        let circuit = build_host_circuit::<KeccakChip<Fr>>(&table, 22, ());
+        let _ = MockProver::run(22, &circuit, vec![]).unwrap();
     }
 }

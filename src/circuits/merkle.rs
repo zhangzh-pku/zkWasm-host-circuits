@@ -156,23 +156,10 @@ impl<const D: usize> MerkleChip<Fr, D> {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        let compare_assist: [_; D] = self
-            .state
-            .assist
-            .iter()
-            .zip(new_assist.iter())
-            .map(|(old, new)| {
-                self.config
-                    .select(region, &mut (), offset, &is_set, &new, &old, 0)
-                    .unwrap()
-            })
-            .collect::<Vec<_>>()
+        let compare_assist: [_; D] = new_assist
             .try_into()
-            .unwrap();
-        for (a, b) in compare_assist.to_vec().into_iter().zip(new_assist) {
-            region.constrain_equal(a.get_the_cell().cell(), b.get_the_cell().cell())?;
-        }
-        self.state.assist = compare_assist.clone();
+            .expect("merkle assist length mismatch");
+        self.state.assist = compare_assist;
 
         let mut positions = vec![];
         self.config
@@ -212,7 +199,7 @@ impl<const D: usize> MerkleChip<Fr, D> {
         let final_hash = positions
             .iter()
             .rev()
-            .zip(compare_assist.iter().rev())
+            .zip(self.state.assist.iter().rev())
             .fold(initial_hash, |acc, (position, assist)| {
                 let left = self
                     .config

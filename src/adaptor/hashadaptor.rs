@@ -244,7 +244,7 @@ mod tests {
     use halo2_proofs::pairing::bn256::Fr;
     use std::fs::File;
 
-    use crate::host::ForeignInst::{PoseidonFinalize, PoseidonNew, PoseidonPush};
+    use crate::host::ForeignInst::{Log, PoseidonFinalize, PoseidonNew, PoseidonPush};
 
     fn hash_cont(restart: bool) -> Vec<ExternalHostCallEntry> {
         vec![ExternalHostCallEntry {
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn generate_poseidon_input() {
-        let table = hash_to_host_call_table(vec![[
+        let inputs = [
             Fr::one(),
             Fr::zero(),
             Fr::zero(),
@@ -281,14 +281,32 @@ mod tests {
             Fr::zero(),
             Fr::zero(),
             Fr::zero(),
-        ]]);
+        ];
+        let table = hash_to_host_call_table(vec![inputs]);
+        let entries = &table.0;
+        assert_eq!(entries.len(), 37);
+        assert_eq!(entries[0].op, PoseidonNew as usize);
+        assert_eq!(entries[0].value, 1);
+        assert!(entries[1..33]
+            .iter()
+            .all(|entry| entry.op == PoseidonPush as usize));
+        assert!(entries[33..]
+            .iter()
+            .all(|entry| entry.op == PoseidonFinalize as usize));
+        let mut hasher = crate::host::poseidon::POSEIDON_HASHER.clone();
+        let expected = hasher.update_exact(&inputs);
+        let expected_entries = crate::adaptor::fr_to_args(expected, 4, 64, PoseidonFinalize);
+        for (actual, expected) in entries[33..].iter().zip(expected_entries.iter()) {
+            assert_eq!(actual.op, expected.op);
+            assert_eq!(actual.value, expected.value);
+        }
         let file = File::create("poseidontest.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
     }
 
     #[test]
     fn generate_poseidon_input_multi() {
-        let table = hash_to_host_call_table(vec![
+        let inputs = vec![
             [Fr::one(); 8],
             [
                 Fr::one(),
@@ -300,7 +318,33 @@ mod tests {
                 Fr::zero(),
                 Fr::zero(),
             ],
-        ]);
+        ];
+        let table = hash_to_host_call_table(inputs.clone());
+        let entries = &table.0;
+        let round_len = 37usize;
+        assert_eq!(entries.len(), round_len * inputs.len());
+        let mut hasher = crate::host::poseidon::POSEIDON_HASHER.clone();
+        for (round_idx, round) in inputs.iter().enumerate() {
+            let base = round_idx * round_len;
+            let expected_new = if round_idx == 0 { 1u64 } else { 0u64 };
+            assert_eq!(entries[base].op, PoseidonNew as usize);
+            assert_eq!(entries[base].value, expected_new);
+            assert!(entries[base + 1..base + 33]
+                .iter()
+                .all(|entry| entry.op == PoseidonPush as usize));
+            assert!(entries[base + 33..base + 37]
+                .iter()
+                .all(|entry| entry.op == PoseidonFinalize as usize));
+            let expected = hasher.update_exact(round);
+            let expected_entries = crate::adaptor::fr_to_args(expected, 4, 64, PoseidonFinalize);
+            for (actual, expected) in entries[base + 33..base + 37]
+                .iter()
+                .zip(expected_entries.iter())
+            {
+                assert_eq!(actual.op, expected.op);
+                assert_eq!(actual.value, expected.value);
+            }
+        }
         let file = File::create("poseidontest_multi.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &table).expect("can not write to file");
     }
@@ -333,6 +377,38 @@ mod tests {
     #[test]
     fn poseidon_host_circuit_accepts_single_round() {
         let table = hash_to_host_call_table(vec![[Fr::one(); 8]]);
+        let circuit = build_host_circuit::<PoseidonChip<Fr, 9, 8>>(&table, 22, ());
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn poseidon_host_circuit_accepts_multi_round() {
+        let table = hash_to_host_call_table(vec![[Fr::one(); 8], [Fr::from(2u64); 8]]);
+        let circuit = build_host_circuit::<PoseidonChip<Fr, 9, 8>>(&table, 22, ());
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    #[should_panic]
+    fn poseidon_host_circuit_rejects_wrong_digest() {
+        let mut table = hash_to_host_call_table(vec![[Fr::one(); 8]]);
+        if let Some(entry) = table.0.last_mut() {
+            entry.value = entry.value.wrapping_add(1);
+        }
+        let circuit = build_host_circuit::<PoseidonChip<Fr, 9, 8>>(&table, 22, ());
+        let _ = MockProver::run(22, &circuit, vec![]).unwrap();
+    }
+
+    #[test]
+    fn poseidon_host_circuit_ignores_unrelated_opcodes() {
+        let mut table = hash_to_host_call_table(vec![[Fr::one(); 8]]);
+        table.0.push(ExternalHostCallEntry {
+            op: Log as usize,
+            value: 99,
+            is_ret: false,
+        });
         let circuit = build_host_circuit::<PoseidonChip<Fr, 9, 8>>(&table, 22, ());
         let prover = MockProver::run(22, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()));

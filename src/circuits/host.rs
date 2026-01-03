@@ -435,3 +435,21 @@ impl<S: HostOpSelector> HostOpChip<Fr, S> {
         Ok(arg_cells)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::HostOpConfig;
+    use halo2_proofs::pairing::bn256::Fr;
+    use halo2_proofs::plonk::ConstraintSystem;
+
+    #[test]
+    #[should_panic]
+    fn host_op_config_rejects_more_than_five_opcodes() {
+        let mut cs = ConstraintSystem::<Fr>::default();
+        let witness = [0; 11].map(|_| cs.advice_column());
+        let fixed = [0; 3].map(|_| cs.fixed_column());
+        let config = HostOpConfig::new(witness, fixed, []);
+        let opcodes = (0..6).map(|i| Fr::from(i as u64)).collect::<Vec<_>>();
+        config.configure(&mut cs, &opcodes);
+    }
+}

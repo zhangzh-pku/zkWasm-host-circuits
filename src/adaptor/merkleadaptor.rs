@@ -346,20 +346,29 @@ impl<const DEPTH: usize> HostOpSelector for MerkleChip<Fr, DEPTH> {
 #[cfg(test)]
 mod tests {
     use super::kvpair_to_host_call_table;
+    use crate::host::db::RocksDB;
     use crate::host::merkle::{MerkleNode, MerkleTree};
     use crate::host::mongomerkle::MongoMerkle;
     use crate::host::mongomerkle::DEFAULT_HASH_VEC;
     use crate::host::ExternalHostCallEntryTable;
-    use crate::host::ForeignInst::{MerkleGet, MerkleSet};
+    use crate::host::ForeignInst::{
+        MerkleAddress, MerkleGet, MerkleGetRoot, MerkleSet, MerkleSetRoot,
+    };
     use crate::proof::MERKLE_DEPTH;
     use crate::utils::bytes_to_field;
     use crate::utils::bytes_to_u64;
+    use crate::utils::data_to_bytes;
     use crate::utils::field_to_bytes;
     use crate::proof::build_host_circuit;
     use crate::circuits::merkle::MerkleChip;
+    use ff::PrimeField;
+    use halo2_proofs::arithmetic::FieldExt;
     use halo2_proofs::dev::MockProver;
     use halo2_proofs::pairing::bn256::Fr;
+    use std::cell::RefCell;
     use std::fs::File;
+    use std::rc::Rc;
+    use tempfile::tempdir;
 
     #[test]
     fn generate_kvpair_input_get_set() {
@@ -367,10 +376,12 @@ mod tests {
         let address = (1_u64 << MERKLE_DEPTH as u32) - 1;
         let index = 0;
         let data = Fr::from(0x1000 as u64);
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
         let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
             [0u8; 32],
             DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
-            None,
+            Some(db.clone()),
         );
 
         let (mut leaf, _) = mt.get_leaf_with_proof(address).unwrap();
@@ -397,6 +408,23 @@ mod tests {
                 MerkleSet,
             ),
         ]);
+        let chunk_len = 13usize;
+        assert_eq!(default_table.len(), chunk_len * 2);
+        let expected_ops = [MerkleGet, MerkleSet];
+        let expected_addresses = [index, index];
+        for (idx, chunk) in default_table.chunks(chunk_len).enumerate() {
+            assert_eq!(chunk[0].op, MerkleAddress as usize);
+            assert_eq!(chunk[0].value, expected_addresses[idx] as u64);
+            assert!(chunk[1..5]
+                .iter()
+                .all(|entry| entry.op == MerkleSetRoot as usize));
+            assert!(chunk[5..9]
+                .iter()
+                .all(|entry| entry.op == expected_ops[idx] as usize));
+            assert!(chunk[9..]
+                .iter()
+                .all(|entry| entry.op == MerkleGetRoot as usize));
+        }
         let file = File::create("kvpair_test1.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &ExternalHostCallEntryTable(default_table))
             .expect("can not write to file");
@@ -409,10 +437,12 @@ mod tests {
         let address = (1_u64 << (MERKLE_DEPTH as u32)) - 1 + index;
         let data = Fr::from(0x1000 as u64);
 
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
         let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
             [0u8; 32],
             DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
-            None,
+            Some(db.clone()),
         );
         let (mut leaf, _) = mt.get_leaf_with_proof(address).unwrap();
         let bytesdata = field_to_bytes(&data).to_vec();
@@ -445,6 +475,23 @@ mod tests {
                 MerkleSet,
             ),
         ]);
+        let chunk_len = 13usize;
+        assert_eq!(default_table.len(), chunk_len * 3);
+        let expected_ops = [MerkleGet, MerkleGet, MerkleSet];
+        let expected_addresses = [index + 1, index, index];
+        for (idx, chunk) in default_table.chunks(chunk_len).enumerate() {
+            assert_eq!(chunk[0].op, MerkleAddress as usize);
+            assert_eq!(chunk[0].value, expected_addresses[idx] as u64);
+            assert!(chunk[1..5]
+                .iter()
+                .all(|entry| entry.op == MerkleSetRoot as usize));
+            assert!(chunk[5..9]
+                .iter()
+                .all(|entry| entry.op == expected_ops[idx] as usize));
+            assert!(chunk[9..]
+                .iter()
+                .all(|entry| entry.op == MerkleGetRoot as usize));
+        }
         let file = File::create("kvpair_test2.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &ExternalHostCallEntryTable(default_table))
             .expect("can not write to file");
@@ -454,15 +501,231 @@ mod tests {
     fn merkle_host_circuit_accepts_get_set_sequence() {
         let root_default = Fr::from_raw(bytes_to_u64(&DEFAULT_HASH_VEC[MERKLE_DEPTH]));
         let index = 0;
-        let data = Fr::from(0x1000 as u64);
         let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&vec![(
             index,
             root_default,
             root_default,
-            [data, Fr::zero()],
+            [Fr::zero(), Fr::zero()],
             MerkleGet,
         )]));
         let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, None);
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    fn leaf_index_from_address(address: u64) -> u64 {
+        (1u64 << MERKLE_DEPTH) - 1 + address
+    }
+
+    fn values_from_leaf_data(data: Option<[u8; 32]>) -> [Fr; 2] {
+        let data = data.unwrap_or([0u8; 32]);
+        let mut out = Vec::with_capacity(2);
+        for chunk in data.chunks(16) {
+            let mut v = chunk.to_vec();
+            v.extend_from_slice(&[0u8; 16]);
+            let f = Fr::from_repr(v.try_into().unwrap()).unwrap();
+            out.push(f);
+        }
+        out.try_into().unwrap()
+    }
+
+    fn push_set_op(
+        ops: &mut Vec<(u64, Fr, Fr, [Fr; 2], crate::host::ForeignInst)>,
+        mt: &mut MongoMerkle<MERKLE_DEPTH>,
+        address: u64,
+        values: [Fr; 2],
+    ) {
+        let root_before = bytes_to_field(&mt.get_root_hash());
+        let index = leaf_index_from_address(address);
+        let (mut leaf, _) = mt.get_leaf_with_proof(index).unwrap();
+        leaf.set(&data_to_bytes(vec![values[0], values[1]]).to_vec());
+        mt.set_leaf_with_proof(&leaf).unwrap();
+        let root_after = bytes_to_field(&mt.get_root_hash());
+        ops.push((address, root_before, root_after, values, MerkleSet));
+    }
+
+    fn push_get_op(
+        ops: &mut Vec<(u64, Fr, Fr, [Fr; 2], crate::host::ForeignInst)>,
+        mt: &mut MongoMerkle<MERKLE_DEPTH>,
+        address: u64,
+    ) {
+        let root = bytes_to_field(&mt.get_root_hash());
+        let index = leaf_index_from_address(address);
+        let (leaf, _) = mt.get_leaf_with_proof(index).unwrap();
+        let values = values_from_leaf_data(leaf.data);
+        ops.push((address, root, root, values, MerkleGet));
+    }
+
+    #[test]
+    fn merkle_max_address_boundary_set() {
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db.clone()),
+        );
+
+        let max_addr = (1u64 << MERKLE_DEPTH) - 1;
+        let values = [Fr::from(1u64), Fr::from(2u64)];
+        let mut ops = Vec::new();
+        push_set_op(&mut ops, &mut mt, max_addr, values);
+
+        let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&ops));
+        let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, Some(db));
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn merkle_sequential_addresses() {
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db.clone()),
+        );
+
+        let mut ops = Vec::new();
+        for (addr, val) in (0u64..4u64).zip(1u64..5u64) {
+            push_set_op(&mut ops, &mut mt, addr, [Fr::from(val), Fr::zero()]);
+        }
+
+        let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&ops));
+        let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, Some(db));
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn merkle_sparse_addresses() {
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db.clone()),
+        );
+
+        let mut ops = Vec::new();
+        let addresses = [0u64, 1u64 << 16, 1u64 << 24, 1u64 << 31];
+        for (idx, addr) in addresses.iter().enumerate() {
+            push_set_op(
+                &mut ops,
+                &mut mt,
+                *addr,
+                [Fr::from((idx + 1) as u64), Fr::from((idx + 10) as u64)],
+            );
+        }
+
+        let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&ops));
+        let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, Some(db));
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn merkle_same_address_multiple_updates() {
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db.clone()),
+        );
+
+        let mut ops = Vec::new();
+        let addr = 5u64;
+        push_set_op(
+            &mut ops,
+            &mut mt,
+            addr,
+            [Fr::from_u128(u128::MAX), Fr::from_u128(u128::MAX)],
+        );
+        push_set_op(&mut ops, &mut mt, addr, [Fr::zero(), Fr::from(3u64)]);
+        push_set_op(&mut ops, &mut mt, addr, [Fr::zero(), Fr::zero()]);
+
+        let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&ops));
+        let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, Some(db));
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn merkle_root_consistency_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db.clone()),
+        );
+
+        let root_before = mt.get_root_hash();
+        let index = leaf_index_from_address(7);
+        let (mut leaf, _) = mt.get_leaf_with_proof(index).unwrap();
+        leaf.set(&data_to_bytes(vec![Fr::from(9u64), Fr::zero()]).to_vec());
+        mt.set_leaf_with_proof(&leaf).unwrap();
+        let root_after_set = mt.get_root_hash();
+        assert_ne!(root_before, root_after_set);
+
+        let _ = mt.get_leaf_with_proof(index).unwrap();
+        assert_eq!(mt.get_root_hash(), root_after_set);
+
+        let dir2 = tempdir().unwrap();
+        let db2 = Rc::new(RefCell::new(RocksDB::new(dir2.path()).unwrap()));
+        let mut mt2 = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db2),
+        );
+        let (mut leaf2, _) = mt2.get_leaf_with_proof(index).unwrap();
+        leaf2.set(&data_to_bytes(vec![Fr::from(9u64), Fr::zero()]).to_vec());
+        mt2.set_leaf_with_proof(&leaf2).unwrap();
+        assert_eq!(mt2.get_root_hash(), root_after_set);
+    }
+
+    #[test]
+    fn merkle_set_get_set_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db.clone()),
+        );
+
+        let mut ops = Vec::new();
+        let addr = 2u64;
+        push_set_op(&mut ops, &mut mt, addr, [Fr::from(7u64), Fr::from(8u64)]);
+        push_get_op(&mut ops, &mut mt, addr);
+        push_set_op(&mut ops, &mut mt, addr, [Fr::from(9u64), Fr::from(10u64)]);
+
+        let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&ops));
+        let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, Some(db));
+        let prover = MockProver::run(22, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn merkle_interleaved_operations() {
+        let dir = tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(dir.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct(
+            [0u8; 32],
+            DEFAULT_HASH_VEC[MERKLE_DEPTH].clone(),
+            Some(db.clone()),
+        );
+
+        let mut ops = Vec::new();
+        push_set_op(&mut ops, &mut mt, 1, [Fr::from(11u64), Fr::from(12u64)]);
+        push_set_op(&mut ops, &mut mt, 3, [Fr::from(13u64), Fr::from(14u64)]);
+        push_get_op(&mut ops, &mut mt, 1);
+        push_get_op(&mut ops, &mut mt, 3);
+
+        let table = ExternalHostCallEntryTable(kvpair_to_host_call_table(&ops));
+        let circuit = build_host_circuit::<MerkleChip<Fr, MERKLE_DEPTH>>(&table, 22, Some(db));
         let prover = MockProver::run(22, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()));
     }

@@ -219,6 +219,7 @@ impl HostOpSelector for AltJubChip<Fr> {
 mod tests {
     use super::msm_to_host_call_table;
     use crate::circuits::babyjub::AltJubChip;
+    use crate::host::ForeignInst::{JubjubSumNew, JubjubSumPush, JubjubSumResult};
     use crate::host::jubjub::Point;
     use crate::host::ExternalHostCallEntryTable;
     use crate::proof::build_host_circuit;
@@ -229,6 +230,15 @@ mod tests {
     #[test]
     fn generate_jubjub_msm_input() {
         let default_table = msm_to_host_call_table(&vec![(Point::identity(), Fr::one())]);
+        assert_eq!(default_table.len(), 21);
+        assert_eq!(default_table[0].op, JubjubSumNew as usize);
+        assert_eq!(default_table[0].value, 1);
+        assert!(default_table[1..13]
+            .iter()
+            .all(|entry| entry.op == JubjubSumPush as usize));
+        assert!(default_table[13..]
+            .iter()
+            .all(|entry| entry.op == JubjubSumResult as usize));
         let file = File::create("jubjub.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &ExternalHostCallEntryTable(default_table))
             .expect("can not write to file");
@@ -237,6 +247,15 @@ mod tests {
     #[test]
     fn generate_jubjub_msm_input_multi() {
         let default_table = msm_to_host_call_table(&vec![(Point::identity(), Fr::one())]);
+        assert_eq!(default_table.len(), 21);
+        assert_eq!(default_table[0].op, JubjubSumNew as usize);
+        assert_eq!(default_table[0].value, 1);
+        assert!(default_table[1..13]
+            .iter()
+            .all(|entry| entry.op == JubjubSumPush as usize));
+        assert!(default_table[13..]
+            .iter()
+            .all(|entry| entry.op == JubjubSumResult as usize));
         let file = File::create("jubjub_multi.json").expect("can not create file");
         serde_json::to_writer_pretty(file, &ExternalHostCallEntryTable(default_table))
             .expect("can not write to file");

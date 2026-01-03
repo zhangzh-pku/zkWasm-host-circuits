@@ -791,6 +791,128 @@ mod error_tests {
     }
 }
 
+#[cfg(test)]
+mod record_tests {
+    use super::{MerkleRecord, MongoMerkle, DEFAULT_HASH_VEC};
+    use crate::host::cache::MERKLE_CACHE;
+    use crate::host::datahash::DataHashRecord;
+    use crate::host::db::{RocksDB, TreeDB};
+    use crate::host::merkle::MerkleTree;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    struct MockTreeDB {
+        merkle: RefCell<HashMap<[u8; 32], MerkleRecord>>,
+        data: RefCell<HashMap<[u8; 32], DataHashRecord>>,
+    }
+
+    impl MockTreeDB {
+        fn new() -> Self {
+            Self {
+                merkle: RefCell::new(HashMap::new()),
+                data: RefCell::new(HashMap::new()),
+            }
+        }
+
+        fn clear(&self) {
+            self.merkle.borrow_mut().clear();
+            self.data.borrow_mut().clear();
+        }
+    }
+
+    impl TreeDB for MockTreeDB {
+        fn get_merkle_record(
+            &self,
+            hash: &[u8; 32],
+        ) -> Result<Option<MerkleRecord>, anyhow::Error> {
+            Ok(self.merkle.borrow().get(hash).cloned())
+        }
+
+        fn set_merkle_record(&mut self, record: MerkleRecord) -> Result<(), anyhow::Error> {
+            self.merkle.borrow_mut().insert(record.hash, record);
+            Ok(())
+        }
+
+        fn set_merkle_records(&mut self, records: &Vec<MerkleRecord>) -> Result<(), anyhow::Error> {
+            for record in records.iter() {
+                self.merkle.borrow_mut().insert(record.hash, record.clone());
+            }
+            Ok(())
+        }
+
+        fn get_data_record(
+            &self,
+            hash: &[u8; 32],
+        ) -> Result<Option<DataHashRecord>, anyhow::Error> {
+            Ok(self.data.borrow().get(hash).cloned())
+        }
+
+        fn set_data_record(&mut self, record: DataHashRecord) -> Result<(), anyhow::Error> {
+            self.data.borrow_mut().insert(record.hash, record);
+            Ok(())
+        }
+
+        fn start_record(&mut self, _record_db: RocksDB) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stop_record(&mut self) -> anyhow::Result<RocksDB> {
+            Err(anyhow::anyhow!("recording not supported"))
+        }
+
+        fn is_recording(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn merkle_record_round_trip_slice() {
+        let record = MerkleRecord {
+            index: 0,
+            hash: [1u8; 32],
+            left: Some([2u8; 32]),
+            right: None,
+            data: Some([3u8; 32]),
+        };
+        let encoded = record.to_slice();
+        let decoded = MerkleRecord::from_slice(&encoded).expect("round trip");
+        assert_eq!(decoded.hash, record.hash);
+        assert_eq!(decoded.left, record.left);
+        assert_eq!(decoded.right, record.right);
+        assert_eq!(decoded.data, record.data);
+    }
+
+    #[test]
+    fn merkle_record_from_slice_rejects_invalid_flags() {
+        let mut bytes = vec![0u8; 32];
+        bytes.push(2);
+        let err = MerkleRecord::from_slice(&bytes).unwrap_err();
+        assert!(err.to_string().contains("Invalid left flag"));
+    }
+
+    #[test]
+    fn update_record_populates_cache() {
+        if let Ok(mut cache) = MERKLE_CACHE.lock() {
+            cache.clear();
+        }
+
+        let mock_db = Rc::new(RefCell::new(MockTreeDB::new()));
+        let mut mt = MongoMerkle::<4>::construct([0u8; 32], DEFAULT_HASH_VEC[4], Some(mock_db.clone()));
+        let record = MerkleRecord {
+            index: 0,
+            hash: [9u8; 32],
+            left: None,
+            right: None,
+            data: None,
+        };
+        mt.update_record(record.clone()).unwrap();
+        mock_db.borrow().clear();
+        let got = mt.get_record(&record.hash).unwrap();
+        assert_eq!(got.unwrap(), record);
+    }
+}
+
 #[cfg(all(test, any(feature = "mongo-std-sync", feature = "mongo-tokio-sync")))]
 mod tests {
     use super::{MerkleRecord, MongoMerkle, DEFAULT_HASH_VEC, RocksMerkle};
@@ -806,6 +928,26 @@ mod tests {
     use std::collections::HashMap;
     use std::rc::Rc;
     use std::time::Instant;
+
+    fn mongo_available(mongodb: &MongoDB) -> bool {
+        mongodb
+            .get_database_client()
+            .and_then(|client| {
+                client
+                    .database(MONGODB_DATABASE)
+                    .run_command(doc! {"ping": 1}, None)
+            })
+            .is_ok()
+    }
+
+    fn require_mongo(mongodb: &MongoDB) -> bool {
+        if mongo_available(mongodb) {
+            true
+        } else {
+            eprintln!("Skipping MongoDB-backed test: server not available");
+            false
+        }
+    }
 
     #[test]
     /* Test for check parent node
@@ -826,6 +968,9 @@ mod tests {
         );
 
         let mongodb = Rc::new(RefCell::new(MongoDB::new(TEST_ADDR, None)));
+        if !require_mongo(&mongodb.borrow()) {
+            return;
+        }
 
         let mut mt = MongoMerkle::<DEPTH>::construct(
             TEST_ADDR,
@@ -875,6 +1020,9 @@ mod tests {
         ];
 
         let mongodb = Rc::new(RefCell::new(MongoDB::new(TEST_ADDR, None)));
+        if !require_mongo(&mongodb.borrow()) {
+            return;
+        }
 
         // 1
         let mut mt = MongoMerkle::<DEPTH>::construct(
@@ -927,6 +1075,9 @@ mod tests {
         ];
 
         let mongodb = Rc::new(RefCell::new(MongoDB::new(TEST_ADDR, None)));
+        if !require_mongo(&mongodb.borrow()) {
+            return;
+        }
 
         // 1
         let mut mt = MongoMerkle::<DEPTH>::construct(
@@ -990,6 +1141,9 @@ mod tests {
         ];
 
         let mongodb = Rc::new(RefCell::new(MongoDB::new(test_addr, None)));
+        if !require_mongo(&mongodb.borrow()) {
+            return;
+        }
 
         // 1
         let mut mt = MongoMerkle::<DEPTH>::construct(
@@ -1085,6 +1239,9 @@ mod tests {
 
 
         let mongodb = Rc::new(RefCell::new(MongoDB::new(TEST_ADDR, None)));
+        if !require_mongo(&mongodb.borrow()) {
+            return;
+        }
 
         // 1
         let mut mt = MongoMerkle::<DEPTH>::construct(

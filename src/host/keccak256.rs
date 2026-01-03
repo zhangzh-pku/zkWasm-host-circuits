@@ -223,6 +223,7 @@ lazy_static::lazy_static! {
 mod tests {
     use super::KECCAK_HASHER;
     use crate::host::keccak256::N_R;
+    use crate::host::keccak256::RATE;
     use itertools::Itertools;
     use rand::RngCore;
     use rand_core::OsRng;
@@ -233,6 +234,29 @@ mod tests {
             out.extend_from_slice(&lane.to_le_bytes());
         }
         out
+    }
+
+    fn hash_with_manual_padding(inputs: &[u64]) -> [u64; 4] {
+        let mut keccak = super::KECCAK_HASHER.clone();
+        let mut lanes = inputs.to_vec();
+        let len = lanes.len();
+        let padding_total = RATE - (lanes.len() % RATE);
+        let starting_one_lane = 1u64;
+        let ending_one_lane = 1u64 << 63;
+        let one_zero_one_lane = starting_one_lane + ending_one_lane;
+
+        if padding_total == 1 {
+            lanes.push(one_zero_one_lane);
+        } else {
+            lanes.push(starting_one_lane);
+            lanes.resize(len + padding_total - 1, 0);
+            lanes.push(ending_one_lane);
+        }
+
+        for chunk in lanes.chunks(RATE) {
+            keccak.state.absorb(&chunk.try_into().unwrap());
+        }
+        keccak.state.result()
     }
 
     #[test]
@@ -250,19 +274,15 @@ mod tests {
 
     #[test]
     fn test_keccak() {
-        let exp = [
-            197, 210, 70, 1, 134, 247, 35, 60, 146, 126, 125, 178, 220, 199, 3, 192, 229, 0, 182,
-            83, 202, 130, 39, 59, 123, 250, 216, 4, 93, 133, 164, 112,
-        ];
-        let expect_str = exp.iter().map(|x| format!("{:02x}", x)).join("");
+        let expected = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
         let mut hasher = super::KECCAK_HASHER.clone();
         hasher.update(&[]);
         let result = hasher.squeeze();
-
-        let hash = result.iter().map(|x| format!("{:02x}", x)).join("");
-        println!("hash result is {:?}", hash); // endian does not match the reference implementation
-        println!("expect result is {:?}", expect_str);
-        //assert_eq!(result.to_string(), ZERO_HASHER_SQUEEZE);
+        let hash = lanes_to_bytes_le(&result)
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .join("");
+        assert_eq!(hash, expected);
     }
 
     #[test]
@@ -294,15 +314,12 @@ mod tests {
 
     #[test]
     fn keccak256_check_reference() {
+        let inputs = vec![1u64, 2u64, 3u64];
         let mut keccak = KECCAK_HASHER.clone();
-        keccak.update(&[]);
-        let expect = "0x0bbfa9132015329c07b3822630fc263512f39a81d9fc90542cc28fc914d8fa7a";
-        let result = keccak.squeeze();
-        let g = result.iter().map(|x| format!("{:02x}", x)).join("");
-        println!("g is {:?}", g);
-        println!("result is {:?}", result);
-        println!("expect is {:?}", expect);
-        // what is a then?
+        keccak.update(&inputs);
+        let direct = keccak.squeeze();
+        let manual = hash_with_manual_padding(&inputs);
+        assert_eq!(direct, manual);
     }
 
     #[test]
@@ -363,5 +380,31 @@ mod tests {
     }
 
     #[test]
-    fn keccak_run() {}
+    fn keccak256_padding_boundaries_lanes() {
+        for len in [RATE - 1, RATE, RATE + 1] {
+            let inputs = (0..len).map(|i| (i as u64) + 1).collect::<Vec<u64>>();
+            let mut keccak = KECCAK_HASHER.clone();
+            keccak.update(&inputs);
+            let direct = keccak.squeeze();
+            let manual = hash_with_manual_padding(&inputs);
+            assert_eq!(direct, manual);
+        }
+    }
+
+    #[test]
+    fn keccak_run() {
+        let mut inputs = [0u64; RATE];
+        for (idx, lane) in inputs.iter_mut().enumerate() {
+            *lane = idx as u64;
+        }
+
+        let mut keccak_exact = KECCAK_HASHER.clone();
+        let exact = keccak_exact.update_exact(&inputs);
+
+        let mut keccak_update = KECCAK_HASHER.clone();
+        keccak_update.update(&inputs);
+        let via_update = keccak_update.state.result();
+
+        assert_eq!(exact, via_update);
+    }
 }

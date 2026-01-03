@@ -140,13 +140,32 @@ impl<F: FieldExt> BitsArithChip<F> {
                 offset,
             )?;
         }
+        for i in 0..8 {
+            self.assign_table_entries(
+                region,
+                |x, y| {
+                    if i != 0 {
+                        let left = (x >> i) as u16;
+                        let right = ((y << (8 - i)) & 0xff) as u16;
+                        (left | right) as u8
+                    } else {
+                        x
+                    }
+                },
+                BIT_ROTATE_RIGHT + i,
+                offset,
+            )?;
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BitsArithChip, BitsArithConfig, BIT_AND, BIT_XOR};
+    use super::{
+        BitsArithChip, BitsArithConfig, BIT_AND, BIT_NOT_AND, BIT_ROTATE_LEFT, BIT_ROTATE_RIGHT,
+        BIT_XOR,
+    };
     use crate::circuits::LookupAssistConfig;
     use crate::value_for_assign;
     use halo2_proofs::circuit::floor_planner::FlatFloorPlanner;
@@ -227,6 +246,20 @@ mod tests {
         res: [u8; 4],
     }
 
+    #[derive(Clone, Debug)]
+    struct Case {
+        lhs: [u8; 4],
+        rhs: [u8; 4],
+        op: u8,
+        res: [u8; 4],
+    }
+
+    #[derive(Clone, Debug)]
+    struct MultiCaseCircuit {
+        cases: Vec<Case>,
+        expected_table_rows: usize,
+    }
+
     impl Circuit<Fr> for TestCircuit {
         type Config = (BitsArithConfig, HelperChipConfig);
         type FloorPlanner = FlatFloorPlanner;
@@ -275,6 +308,73 @@ mod tests {
         }
     }
 
+    impl Circuit<Fr> for MultiCaseCircuit {
+        type Config = (BitsArithConfig, HelperChipConfig);
+        type FloorPlanner = FlatFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self {
+                cases: vec![],
+                expected_table_rows: self.expected_table_rows,
+            }
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fr>) -> Self::Config {
+            let bits_config = BitsArithChip::<Fr>::configure(meta);
+            let helper_config = HelperChip::configure(meta);
+            bits_config.register(meta, |c| helper_config.lookup_cols(c));
+            (bits_config, helper_config)
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fr>,
+        ) -> Result<(), Error> {
+            let helper = HelperChip::new(config.1);
+            let cases = self.cases.clone();
+            let expected = self.expected_table_rows;
+            layouter.assign_region(
+                || "bits arith multi-case",
+                |region| {
+                    let mut offset = 0;
+                    let mut bits_chip = BitsArithChip::<Fr>::new(config.0.clone());
+                    bits_chip.initialize(&region, &mut offset)?;
+                    assert_eq!(offset, expected);
+
+                    for (row, case) in cases.iter().enumerate() {
+                        let mut values = [Fr::zero(); 13];
+                        for i in 0..4 {
+                            values[i] = Fr::from(case.lhs[i] as u64);
+                            values[i + 4] = Fr::from(case.rhs[i] as u64);
+                            values[i + 8] = Fr::from(case.res[i] as u64);
+                        }
+                        values[12] = Fr::from(case.op as u64);
+                        helper.assign_row(&region, row, values)?;
+                    }
+                    Ok(())
+                },
+            )?;
+            Ok(())
+        }
+    }
+
+    fn rotate_left_byte(lhs: u8, rhs: u8, shift: u8) -> u8 {
+        if shift == 0 {
+            lhs
+        } else {
+            ((lhs << shift) & 0xff) | (rhs >> (8 - shift))
+        }
+    }
+
+    fn rotate_right_byte(lhs: u8, rhs: u8, shift: u8) -> u8 {
+        if shift == 0 {
+            lhs
+        } else {
+            ((lhs >> shift) | ((rhs << (8 - shift)) & 0xff))
+        }
+    }
+
     #[test]
     fn test_bits_arith_xor() {
         let lhs = [0x0f, 0x12, 0x55, 0xaa];
@@ -291,7 +391,7 @@ mod tests {
             op: BIT_XOR,
             res,
         };
-        let prover = MockProver::run(18, &circuit, vec![]).unwrap();
+        let prover = MockProver::run(21, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()));
     }
 
@@ -311,7 +411,127 @@ mod tests {
             op: BIT_AND,
             res,
         };
-        let prover = MockProver::run(18, &circuit, vec![]).unwrap();
+        let prover = MockProver::run(21, &circuit, vec![]).unwrap();
         assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    fn test_bits_arith_additional_ops_and_boundaries() {
+        let shift_left = 1u8;
+        let shift_left_edge = 7u8;
+        let shift_right = 4u8;
+        let shift_right_edge = 7u8;
+        let lhs = [0x12, 0x34, 0x56, 0x78];
+        let rhs = [0x9a, 0xbc, 0xde, 0xf0];
+        let rotate_left_res = [
+            rotate_left_byte(lhs[0], rhs[0], shift_left),
+            rotate_left_byte(lhs[1], rhs[1], shift_left),
+            rotate_left_byte(lhs[2], rhs[2], shift_left),
+            rotate_left_byte(lhs[3], rhs[3], shift_left),
+        ];
+        let rotate_left_edge_res = [
+            rotate_left_byte(lhs[0], rhs[0], shift_left_edge),
+            rotate_left_byte(lhs[1], rhs[1], shift_left_edge),
+            rotate_left_byte(lhs[2], rhs[2], shift_left_edge),
+            rotate_left_byte(lhs[3], rhs[3], shift_left_edge),
+        ];
+        let rotate_right_res = [
+            rotate_right_byte(lhs[0], rhs[0], shift_right),
+            rotate_right_byte(lhs[1], rhs[1], shift_right),
+            rotate_right_byte(lhs[2], rhs[2], shift_right),
+            rotate_right_byte(lhs[3], rhs[3], shift_right),
+        ];
+        let rotate_right_edge_res = [
+            rotate_right_byte(lhs[0], rhs[0], shift_right_edge),
+            rotate_right_byte(lhs[1], rhs[1], shift_right_edge),
+            rotate_right_byte(lhs[2], rhs[2], shift_right_edge),
+            rotate_right_byte(lhs[3], rhs[3], shift_right_edge),
+        ];
+
+        let cases = vec![
+            Case {
+                lhs,
+                rhs,
+                op: BIT_NOT_AND,
+                res: [
+                    (!lhs[0]) & rhs[0],
+                    (!lhs[1]) & rhs[1],
+                    (!lhs[2]) & rhs[2],
+                    (!lhs[3]) & rhs[3],
+                ],
+            },
+            Case {
+                lhs,
+                rhs,
+                op: BIT_ROTATE_LEFT + shift_left,
+                res: rotate_left_res,
+            },
+            Case {
+                lhs,
+                rhs,
+                op: BIT_ROTATE_LEFT + shift_left_edge,
+                res: rotate_left_edge_res,
+            },
+            Case {
+                lhs,
+                rhs,
+                op: BIT_ROTATE_RIGHT + shift_right,
+                res: rotate_right_res,
+            },
+            Case {
+                lhs,
+                rhs,
+                op: BIT_ROTATE_RIGHT + shift_right_edge,
+                res: rotate_right_edge_res,
+            },
+            Case {
+                lhs: [0x00; 4],
+                rhs: [0x00; 4],
+                op: BIT_XOR,
+                res: [0x00; 4],
+            },
+            Case {
+                lhs: [0xff; 4],
+                rhs: [0xff; 4],
+                op: BIT_AND,
+                res: [0xff; 4],
+            },
+            Case {
+                lhs: [0xaa, 0x55, 0xaa, 0x55],
+                rhs: [0x55, 0xaa, 0x55, 0xaa],
+                op: BIT_XOR,
+                res: [0xff, 0xff, 0xff, 0xff],
+            },
+            Case {
+                lhs: [0x01, 0x02, 0x04, 0x08],
+                rhs: [0x00; 4],
+                op: BIT_XOR,
+                res: [0x01, 0x02, 0x04, 0x08],
+            },
+        ];
+
+        let expected_table_rows = (3 + 8 + 8) * 256 * 256;
+        let circuit = MultiCaseCircuit {
+            cases,
+            expected_table_rows,
+        };
+        let prover = MockProver::run(21, &circuit, vec![]).unwrap();
+        assert_eq!(prover.verify(), Ok(()));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_bits_arith_invalid_opcode_rejection() {
+        let lhs = [0x10, 0x20, 0x30, 0x40];
+        let rhs = [0x01, 0x02, 0x03, 0x04];
+        let res = [0x11, 0x22, 0x33, 0x44];
+        let circuit = TestCircuit {
+            lhs,
+            rhs,
+            op: 99,
+            res,
+        };
+        let prover = MockProver::run(21, &circuit, vec![]).unwrap();
+        let _ = prover.verify();
     }
 }

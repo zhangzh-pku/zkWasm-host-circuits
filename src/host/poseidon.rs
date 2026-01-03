@@ -193,4 +193,17 @@ mod tests {
         let out_b = hasher_b.update_exact(&inputs).to_repr();
         assert_eq!(out_a, out_b);
     }
+
+    #[test]
+    fn poseidon_avalanche_effect_changes_output() {
+        let mut inputs_a = [Fr::zero(); 8];
+        let mut inputs_b = [Fr::zero(); 8];
+        inputs_b[0] = Fr::one();
+
+        let mut hasher_a = super::POSEIDON_HASHER.clone();
+        let mut hasher_b = super::POSEIDON_HASHER.clone();
+        let out_a = hasher_a.update_exact(&inputs_a).to_repr();
+        let out_b = hasher_b.update_exact(&inputs_b).to_repr();
+        assert_ne!(out_a, out_b);
+    }
 }
