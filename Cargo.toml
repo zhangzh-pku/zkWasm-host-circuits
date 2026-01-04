@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "zkwasm-host-circuits-prover"
 path = "src/main.rs"
+required-features = ["prover"]
 
 [[bin]]
 name = "migrate_from_mongo_to_rocksdb"
@@ -23,12 +24,12 @@ strum = "0.24.1"
 strum_macros = "0.24.1"
 ff = "0.12"
 cfg-if = "1.0.0"
-halo2_proofs = { git = "https://github.com/DelphinusLab/halo2-gpu-specific.git", tag="stable-logup-shuffle-v1.0.1" }
-halo2ecc-o = { git = "https://github.com/ooglayout/halo2ecc-o.git"}
+halo2_proofs = { git = "https://github.com/DelphinusLab/halo2-gpu-specific.git", tag = "stable-logup-shuffle-v1.0.1", default-features = true }
+halo2ecc_o = { git = "https://github.com/DelphinusLab/halo2ecc-s.git", tag = "on-prove-pairing-0.6.4", package = "halo2ecc-s", optional = true }
 itertools = "0.10.0"
 num-bigint = { version = "0.4", features = ["rand"] }
 poseidon = { git = "https://github.com/DelphinusLab/poseidon" }
-circuits-batcher = { git = "https://github.com/DelphinusLab/continuation-batcher.git", tag="stable-logup-shuffle-v1.0.1" }
+circuits-batcher = { git = "https://github.com/DelphinusLab/continuation-batcher.git", tag = "stable-shuffle-1.0", optional = true }
 rand = "0.8"
 rand_core = "0.6"
 ark-std = { version = "0.4.0" }
@@ -38,7 +39,7 @@ clap = { version = "3.2.22", features = ["derive", "cargo"] }
 subtle = "2.4"
 lazy_static = "1.4.0"
 hex = "0.4"
-mongodb = { version = "2.5.0", default-features = false}
+mongodb = { version = "2.5.0", default-features = false, optional = true }
 ripemd = "0.1.3"
 lru = "0.11.0"
 anyhow = "1.0.86"
@@ -46,13 +47,16 @@ num-traits = "0.2.15"
 num-derive = "0.3"
 rocksdb = "0.21.0"
 tempfile = "3.12.0"
+parking_lot = "0.12"
+rayon = "1.10.0"
 
 [features]
-default = ["mongo-tokio-sync"]
+default = ["mongo-tokio-sync", "prover"]
 bls = []
-perf = ["circuits-batcher/perf"]
-mongo-std-sync = ["mongodb/sync"]
-mongo-tokio-sync = ["mongodb/tokio-sync"]
+prover = ["dep:circuits-batcher", "dep:halo2ecc_o"]
+perf = ["prover", "circuits-batcher/perf"]
+mongo-std-sync = ["dep:mongodb", "mongodb/sync"]
+mongo-tokio-sync = ["dep:mongodb", "mongodb/tokio-sync"]
 cuda = ["halo2_proofs/cuda"]
 complex-leaf = []
-profile = ["ark-std/print-trace", "halo2_proofs/profile", "circuits-batcher/profile"]
+profile = ["ark-std/print-trace", "halo2_proofs/profile", "prover", "circuits-batcher/profile"]

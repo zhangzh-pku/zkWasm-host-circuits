@@ -26,7 +26,7 @@ use circuits_batcher::proof::{ParamsCache, ProofGenerationInfo, ProofPieceInfo, 
 use crate::host::ExternalHostCallEntryTable;
 use serde::{Deserialize, Serialize};
 
-pub const MERKLE_DEPTH: usize = 32;
+pub use crate::constants::MERKLE_DEPTH;
 
 #[derive(clap::Parser)]
 struct ArgOpName {

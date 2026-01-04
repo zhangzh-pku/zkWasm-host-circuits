@@ -145,26 +145,20 @@ pub trait MerkleTree<H: Debug + Clone + PartialEq, const D: usize> {
     /// 1 2
     /// 3 4 5 6
     /// 7 8 9 10 11 12 13 14
-    /// get_path(7) = [3, 1]
-    /// get_path(15) = [6, 2]
+    /// get_path(7) = [1, 3, 7]
+    /// get_path(15) = [2, 6, 15]
     fn get_path(&self, index: u64) -> Result<[u64; D], MerkleError> {
         self.leaf_check(index)?;
-        let mut height = (index + 1).ilog2();
-        let round = height;
-        let full = (1u64 << height) - 1;
-        let mut p = index - full;
-        let mut path = vec![];
-        for _ in 0..round {
-            let full = (1u64 << height) - 1;
-            // Calculate the index of current node
-            let i = full + p;
-            path.insert(0, i);
-            height = height - 1;
-            // Caculate the offset of parent
-            p = p / 2;
+        // Fill from leaf up to (but excluding) root, then reverse in-place by writing backwards.
+        // For a depth-D tree, this returns D indices: depth-1 node ... leaf node.
+        let mut path = [0u64; D];
+        let mut current = index;
+        for slot in path.iter_mut().rev() {
+            *slot = current;
+            current = (current - 1) / 2;
         }
-        assert!(p == 0);
-        Ok(path.try_into().unwrap())
+        debug_assert_eq!(current, 0);
+        Ok(path)
     }
 
     fn get_leaf_with_proof(
@@ -172,26 +166,25 @@ pub trait MerkleTree<H: Debug + Clone + PartialEq, const D: usize> {
         index: u64,
     ) -> Result<(Self::Node, MerkleProof<H, D>), MerkleError> {
         self.leaf_check(index)?;
-        let paths = self.get_path(index)?.to_vec();
-        // We push the search from the top
-        let hash = self.get_root_hash();
+        let paths = self.get_path(index)?;
+        // Walk down from root collecting sibling hashes.
+        let mut hash = self.get_root_hash();
         let mut acc = 0;
         let mut acc_node = self.get_node_with_hash(acc, &hash)?;
-        let assist: Vec<H> = paths
-            .into_iter()
-            .map(|child| {
-                let (hash, sibling_hash) = if (acc + 1) * 2 == child + 1 {
-                    // left child
-                    (acc_node.left().unwrap(), acc_node.right().unwrap())
-                } else {
-                    assert!((acc + 1) * 2 == child);
-                    (acc_node.right().unwrap(), acc_node.left().unwrap())
-                };
-                acc = child;
-                acc_node = self.get_node_with_hash(acc, &hash)?;
-                Ok(sibling_hash)
-            })
-            .collect::<Result<Vec<H>, _>>()?;
+        let mut assist: Vec<H> = Vec::with_capacity(D);
+        for child in paths.iter() {
+            let (child_hash, sibling_hash) = if (acc + 1) * 2 == child + 1 {
+                // left child
+                (acc_node.left().unwrap(), acc_node.right().unwrap())
+            } else {
+                assert!((acc + 1) * 2 == *child);
+                (acc_node.right().unwrap(), acc_node.left().unwrap())
+            };
+            assist.push(sibling_hash);
+            acc = *child;
+            hash = child_hash;
+            acc_node = self.get_node_with_hash(acc, &hash)?;
+        }
         let hash = acc_node.hash();
         Ok((
             acc_node,
@@ -415,6 +408,17 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_get_path_returns_root_to_leaf_indices() {
+        let mt = MerkleAsArray::construct("addr".to_string(), "root".to_string(), None);
+
+        let first_leaf = (1u64 << 6) - 1;
+        assert_eq!(mt.get_path(first_leaf).unwrap(), [1, 3, 7, 15, 31, 63]);
+
+        let last_leaf = (1u64 << 7) - 2;
+        assert_eq!(mt.get_path(last_leaf).unwrap(), [2, 6, 14, 30, 62, 126]);
     }
 
     #[test]
