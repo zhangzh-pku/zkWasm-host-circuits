@@ -360,28 +360,11 @@ impl MerkleNode<[u8; 32]> for MerkleRecord {
         self.hash
     }
     fn set(&mut self, data: &Vec<u8>) {
-        let mut hasher = MERKLE_LEAF_HASHER.clone();
-        self.data = Some(data.clone().try_into().unwrap());
-        let batchdata = data
-            .chunks(16)
-            .into_iter()
-            .map(|x| {
-                let mut v = x.to_vec();
-                v.extend_from_slice(&[0u8; 16]);
-                let f = v.try_into().unwrap();
-                Fr::from_repr(f).unwrap()
-            })
-            .collect::<Vec<Fr>>();
-        let values: [Fr; 2] = batchdata.try_into().unwrap();
-
-        cfg_if::cfg_if! {
-            if #[cfg(feature="complex-leaf")] {
-                hasher.update(&values);
-                self.hash = hasher.squeeze().to_repr();
-            } else {
-                self.hash = hasher.update_exact(&values).to_repr();
-            }
-        }
+        let data: [u8; 32] = data
+            .as_slice()
+            .try_into()
+            .expect("leaf data must be 32 bytes");
+        self.set_bytes(&data);
         //println!("update with values {:?}", values);
         //println!("update with new hash {:?}", self.hash);
     }
@@ -404,6 +387,26 @@ impl MerkleRecord {
         }
     }
 
+    fn set_bytes(&mut self, data: &[u8; 32]) {
+        let mut hasher = MERKLE_LEAF_HASHER.clone();
+        self.data = Some(*data);
+
+        let mut left = [0u8; 32];
+        left[..16].copy_from_slice(&data[..16]);
+        let mut right = [0u8; 32];
+        right[..16].copy_from_slice(&data[16..]);
+        let values = [Fr::from_repr(left).unwrap(), Fr::from_repr(right).unwrap()];
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature="complex-leaf")] {
+                hasher.update(&values);
+                self.hash = hasher.squeeze().to_repr();
+            } else {
+                self.hash = hasher.update_exact(&values).to_repr();
+            }
+        }
+    }
+
     pub fn data_as_u64(&self) -> [u64; 4] {
         let data = self.data.unwrap_or([0; 32]);
         [
@@ -421,7 +424,7 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
     }
     fn empty_leaf(index: u64) -> MerkleRecord {
         let mut leaf = MerkleRecord::new(index);
-        leaf.set(&[0; 32].to_vec());
+        leaf.set_bytes(&[0; 32]);
         leaf
     }
     /// depth start from 0 up to Self::height(). Example 20 height MongoMerkle, root depth=0, leaf depth=20
@@ -448,6 +451,16 @@ impl<const DEPTH: usize> MongoMerkle<DEPTH> {
             assist: assist.map(|x| self.get_default_hash(x + 1).unwrap()),
             index: (1_u64 << DEPTH) - 1,
         }
+    }
+
+    pub fn update_leaf_data_with_proof_raw(
+        &mut self,
+        index: u64,
+        data: &[u8; 32],
+    ) -> Result<MerkleProof<[u8; 32], DEPTH>, MerkleError> {
+        let (mut leaf, _) = self.get_leaf_with_proof(index)?;
+        leaf.set_bytes(data);
+        self.set_leaf_with_proof(&leaf)
     }
 }
 
